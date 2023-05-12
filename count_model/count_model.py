@@ -35,39 +35,39 @@ class CountModel(ABC):
 
     def get_link_weights(
         self,
-        source,
+        src,
         destinations: Iterator,
     ) -> Iterator[Tuple[Any, float]]:
-        source_data = self._link_counter.get_source_data(source)
+        source_data = self._link_counter.get_source_data(src)
         destination_counts = source_data.destination_counts
         source_count = source_data.total
         return (
             (
-                destination,
+                dst,
                 self.get_link_weight(
-                    source,
-                    destination,
+                    src,
+                    dst,
                     source_count,
-                    destination_counts.get(destination, 0),
+                    destination_counts.get(dst, 0),
                 ),
             )
-            for destination in destinations
+            for dst in destinations
         )
 
     def get_destination_weights(
         self,
-        source,
+        src,
     ):
         return self.get_link_weights(
-            source,
-            self._link_counter.get_source_data(source).destination_counts.keys().__iter__(),
+            src,
+            self._link_counter.get_source_data(src).destination_counts.keys().__iter__(),
         )
 
     @abstractmethod
     def get_link_weight(
         self,
-        source,
-        destination,
+        src,
+        dst,
         source_count: int,
         link_count: int,
     ) -> float:

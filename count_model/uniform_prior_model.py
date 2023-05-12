@@ -21,8 +21,8 @@ class UniformPriorModel(CountModel):
 
     def get_link_weight(
         self,
-        source,
-        destination,
+        src,
+        dst,
         source_count: int,
         link_count: int,
     ) -> float:

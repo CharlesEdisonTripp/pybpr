@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Tuple
 from count_model.link_count_data import LinkCountData
 
 from count_model.source_data import SourceData
@@ -11,51 +11,56 @@ class LinkCounter:
 
     def __init__(self) -> None:
         self.__link_map = {}
-
     def observe_link(
         self,
-        source,
-        destination,
+        src,
+        dst,
         num: int = 1,
     ) -> None:
         self.observe_destination(
-            destination,
-            self.get_source_data(source),
+            dst,
+            src,
             num,
         )
 
     def get_source_data(
         self,
-        source,
+        src,
     ) -> SourceData:
         # TODO: if this is called a lot to query unregistered sources we should add a method that does not add it to the link map
         link_map = self.__link_map
-        source_data = link_map.get(source, None)
+        source_data = link_map.get(src, None)
         if source_data is None:
             source_data = SourceData()
-            link_map[source] = source_data
+            link_map[src] = source_data
         return source_data
 
     def get_link_count(
         self,
-        source,
-        dest,
+        src,
+        dst,
     ) -> LinkCountData:
-        source_data = self.__link_map.get(source, SourceData(0, {}))
+        source_data = self.__link_map.get(
+            src,
+            SourceData(0, {}),
+        )
         return LinkCountData(
-            source_data.destination_counts.get(dest, 0),
+            source_data.destination_counts.get(
+                dst,
+                0,
+            ),
             source_data.total,
         )
 
     def observe_destination(
         self,
-        destination,
+        dst,
         link_data: SourceData,
         num: int,
     ) -> None:
         link_data.total += num
         destination_counts = link_data.destination_counts
-        destination_counts[destination] = num + destination_counts.get(destination, 0)
+        destination_counts[dst] = num + destination_counts.get(dst, 0)
 
     def get_sequence_weights(
         self,
@@ -63,9 +68,9 @@ class LinkCounter:
     ) -> Any:
         dests = {}
         denomenator = 0
-        for source, num in sequence:
-            source_data = self.get_source_data(source)
+        for src, num in sequence:
+            source_data = self.get_source_data(src)
             denomenator += source_data.total
-            for dest, num in source_data.destination_counts:
-                dests[dest] = dests.get(dest, 0) + num
+            for dst, num in source_data.destination_counts:
+                dests[dst] = dests.get(dst, 0) + num
         return dests, denomenator

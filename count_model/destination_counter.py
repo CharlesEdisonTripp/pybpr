@@ -1,28 +1,24 @@
 from abc import ABC, abstractmethod
 from collections import deque
+from dataclasses import dataclass
+import itertools
 from typing import Any, Iterator, Tuple
 from count_model.count_model import CountModel
 from count_model.link_counter import LinkCounter
 from count_model.source_data import SourceData
 from count_model.sequence_counter import SequenceCounter
+from count_model.window_counter import WindowCounter
 
 
-class DestinationCounter:
-    _link_counter: LinkCounter
+@dataclass(slots=True)
+class DestinationCounter(WindowCounter):
 
-    def __init__(
+    def observe_window(
         self,
-        link_counter: LinkCounter,
+        window: deque,
     ) -> None:
-        super().__init__()
-        self._link_counter = link_counter
-
-    def observe_sequence(
-        self,
-        sequence: Iterator,
-        destination,
-    ) -> None:
-        link_counter = self._link_counter
-
-        for source, num in sequence:
-            link_counter.observe_link(source, destination, num)
+        dst, dst_num = window[-1]
+        for src, src_num in itertools.islice(window, 0, len(window)-1):
+            self.link_counter.observe_link(src, dst, dst_num * src_num)
+            
+        

@@ -11,7 +11,7 @@ def compute_ndcg(seq):
 def get_actuals(
     df,
     test_df,
-    scoring_function,
+    assess_function,
     # sample_size = 0,
 ):
     user_groups = test_df.groupby('user_id')
