@@ -17,29 +17,29 @@ class NaiveBayes(BinaryAssessor):
 
     def assess(self,
         dst,
-        dest_count,
+        dst_count,
         source_counts,
     ):
-        dest_prior = (self.prior_numerator + dest_count.count) / (
-            self.prior_denominator + dest_count.total
+        dst_prior = (self.prior_numerator + dst_count.count) / (
+            self.prior_denominator + dst_count.total
         )
-        pos_acc = numpy.log(dest_prior)
-        neg_acc = numpy.log(1.0 - dest_prior)
+        pos_acc = numpy.log(dst_prior)
+        neg_acc = numpy.log(1.0 - dst_prior)
         for source_count in source_counts:
             (
-                src,
-                src_to_dst,
-                src_to_ndst,
-                nsrc_to_dest,
-                nsrc_to_ndst,
+                src, # P(Evidence | Event) = P(Evidence and Event) / P(Event)
+                src_to_dst, # Positive Count ~ P(Evidence and Event) ~ total Event & Evidence count
+                src_to_ndst, # Negative Count ~ P(Evidence and !Event) ~ total !Event & Evidence count
+                nsrc_to_dst, # Positive Event Count ~ P(Event) ~ Total Event count
+                nsrc_to_ndst, # Negative Event Count ~ P(!Event) ~ Total ~Event count 
             ) = source_count
             # P(src | dst) -> # src to dst / (# total both src to dst)
             #  link_count(src, dst) / get_source_data(dst).total
             cond_prob = (self.pos_feature_prior_numerator + src_to_dst.count) / (
                 self.pos_feature_prior_denominator
                 + src_to_dst.count
-                + nsrc_to_dest.count
-            )
+                + nsrc_to_dst.count
+            ) # ~P(evidence | event)
             pos_acc += numpy.log(cond_prob)
 
             # src to -dst / total +/- src to -dst
@@ -47,10 +47,10 @@ class NaiveBayes(BinaryAssessor):
                 self.neg_feature_prior_denominator
                 + src_to_ndst.count
                 + nsrc_to_ndst.count
-            )
+            ) # ~P(evidence | !event)
             neg_acc += numpy.log(neg_cond_prob)
             # evidence = (feature_prior_numerator source_count.source_count.count / source_count.source_count.total)
-            # ep += dest_prior * cond_prob
+            # ep += dst_prior * cond_prob
             # s = source_count.source_count
             # ep += np.log((s.count + feature_prior_numerator) / (feature_prior_denominator + s.total))
         pos = numpy.exp(pos_acc)

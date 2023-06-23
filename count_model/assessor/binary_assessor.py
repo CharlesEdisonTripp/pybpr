@@ -16,13 +16,13 @@ class BinaryAssessor(ABC):
     
     def __call__(
         self,
-        sources : Interactions,
-        dst : Interaction,
+        sources : Interactions, # click w/ feature
+        dst : Interaction, # click w/ feature
     ):
         # dest_all_actors = dst.make_anonymous()
         ndst = dst.negative()
 
-        event_count = self.event_counter.get_link_count(dst.object, dst)
+        event_count = self.event_counter.get_link_count(dst.object, dst.verb)
         link_counter = self.link_counter
         source_counts = []
         for src in sources:

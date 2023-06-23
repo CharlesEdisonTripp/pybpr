@@ -11,6 +11,7 @@ class LinkCounter:
 
     def __init__(self) -> None:
         self.__link_map = {}
+
     def observe_link(
         self,
         src,
@@ -19,7 +20,7 @@ class LinkCounter:
     ) -> None:
         self.observe_destination(
             dst,
-            src,
+            self.get_source_data(src),
             num,
         )
 

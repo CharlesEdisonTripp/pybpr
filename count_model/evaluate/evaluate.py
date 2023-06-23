@@ -1,20 +1,19 @@
 import numpy
 
-def log_score(log_prob, *args, **kwargs):
-    return log_prob
+def log_score(p, *args, **kwargs):
+    return 1.0 - numpy.log(p)
 
 
-def brier_score(log_prob, *args, **kwargs):
-    p = numpy.exp(log_prob)
+def brier_score(p, *args, **kwargs):
     return (1 - p) ** 2 + (0 - (1 - p)) ** 2
 
 
-def prob_score(log_prob, *args, **kwargs):
-    return numpy.exp(log_prob)
+def prob_score(p, *args, **kwargs):
+    return p
 
 
-def accuracy_score(log_prob, *args, **kwargs):
-    return 1 if numpy.exp(log_prob) > 0.5 else 0
+def accuracy_score(p, *args, **kwargs):
+    return 1 if p > 0.5 else 0
 
 
 def compute_dcg(seq):
