@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Tuple, Union
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True, frozen=True, eq=True)
 class Interaction:
     subject: Any # the actor
     verb: Any # the action

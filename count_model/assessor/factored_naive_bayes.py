@@ -33,6 +33,7 @@ def compute_naive_bayes(
 
     acc = numpy.exp(acc)
     p = acc[0] / numpy.sum(acc)
+    print(f'nb: {acc} {p}')
     return max(1e-9, min(1.0 - 1e-9, p))
     
 

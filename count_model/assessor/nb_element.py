@@ -12,6 +12,12 @@ class NBElement:
             self.denominator + other.denominator,
         )
 
+    def __mul__(self, other: float) -> "NBElement":
+        return NBElement(
+            self.numerator * other,
+            self.denominator * other,
+        )
+
     def __repr__(self):
         return self.__str__()
 
