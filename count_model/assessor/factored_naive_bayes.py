@@ -14,7 +14,7 @@ import numpy
 #     ):
 
 
-def compute_naive_bayes(
+def compute_naive_bayes_old(
     prior: NBElement,
     factors: Iterable[NBFactor],
 ):
@@ -33,17 +33,37 @@ def compute_naive_bayes(
 
     acc = numpy.exp(acc)
     p = acc[0] / numpy.sum(acc)
-    print(f'nb: {acc} {p}')
+    if numpy.sum(acc) <= 1e-150:
+        print(f"nb acc: {acc} factors: {list(factors)}, prior: {prior}")
+
+    # print(f'nb: {acc} {p}')
     return max(1e-9, min(1.0 - 1e-9, p))
-    
+
+
+def compute_naive_bayes(
+    prior: NBElement,
+    factors: Iterable[NBFactor],
+):
+    prior_probability = prior.probability
+    log_odds = numpy.log(prior_probability / (1.0 - prior_probability))
+
+    for factor in factors:
+        log_odds += numpy.log(factor.likelihood / factor.negative_likelihood)
+        # same as: odds *= P(+A | +B) / P(+A | -B) = (P(+A & +B) / P(A & + B)) / (P(+A & -B) / P(A & -B))
+
+    odds = numpy.exp(log_odds)
+
+    p = odds / (1 + odds) # P(+B | +A)
+    # print(f'nb: {acc} {p}')
+    return max(1e-9, min(1.0 - 1e-9, p))
 
 
 def compute_naive_bayes_with_evidence(
     prior: NBElement,
     likelihood_prior: NBFactor,
-    event, # user A positively rating movie Y
+    event,  # user A positively rating movie Y
     negative_event,
-    evidence: Iterable, # user A positively rated movie X, and other ratings... 
+    evidence: Iterable,  # user A positively rated movie X, and other ratings...
     event_counter: EventCounter,
 ):
     return compute_naive_bayes(

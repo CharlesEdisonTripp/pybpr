@@ -29,4 +29,4 @@ class NBElement:
 
     @property
     def probability(self) -> float:
-        return self.numerator / (self.denominator)
+        return self.numerator / self.denominator
