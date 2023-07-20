@@ -51,6 +51,16 @@ def compute_naive_bayes(
         log_odds += numpy.log(factor.likelihood / factor.negative_likelihood)
         # same as: odds *= P(+A | +B) / P(+A | -B) = (P(+A & +B) / P(A & + B)) / (P(+A & -B) / P(A & -B))
 
+    # log odds = log(P(B happens) / P(B does not happen))
+    # def condition_on_factor(factors, prior_log_odds):
+    #     if len(factors) <= 0:
+    #         return prior_log_odds
+    #     return condition_on_factor(factors[1:], prior_log_odds + numpy.log(factors[0].likelihood / factors[0].negative_likelihood))
+
+    # log_odds = condition_on_factor(factors, log_odds)
+
+        
+
     odds = numpy.exp(log_odds)
 
     p = odds / (1 + odds) # P(+B | +A)
