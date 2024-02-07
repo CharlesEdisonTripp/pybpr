@@ -124,8 +124,6 @@ def load_movielens_items(dataset_name="ml-100k"):
     for column in category_columns:
         movies[column] = movies[column].astype("bool")
 
-    
-
     movies.set_index("item_id", inplace=True, drop=False)
     movies.sort_index(inplace=True)
     return movies
@@ -134,7 +132,7 @@ def load_movielens_items(dataset_name="ml-100k"):
 def make_user_item_interaction(row) -> Interaction:
     return Interaction(
         subject=int(row["user_id"]),
-        verb=row["positive"] == 1,
+        verb=(row["positive"] == 1),
         object=int(row["item_id"]),
         timestamp=row["timestamp"],
     )
@@ -276,6 +274,7 @@ def compute_evaluations(
     evaluation_data = [(*t, []) for t in evaluation_functions]
     for interaction in interactions:
         assesment = assess(interaction)
+        # print(f"interaction: {interaction}, assesment: {assesment}")
         for name, evaluation_func, evaluations in evaluation_data:
             evaluations.append(evaluation_func(assesment, interaction))
 
@@ -321,10 +320,12 @@ def compute_scores(
     merged_evaluations = pandas.concat(
         (test_df.reset_index(drop=True), evaluations),
         axis=1,
-        copy=False,
+        copy=True,
     )
 
-    def summarize_evaluations(evals):
+    print(merged_evaluations.describe())
+
+    def summarize_evaluations():
         result = []
         for column in evaluations.columns:
             e = merged_evaluations[column]
@@ -339,7 +340,7 @@ def compute_scores(
         return result
 
     return ScoreSummary(
-        summarize_evaluations(evaluations),
+        summarize_evaluations(),
         0.0,
         # compute_mean_ndcg(df, test_df, assessment_function),
         # summarize_evaluations(static_evaluations),

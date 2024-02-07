@@ -1,5 +1,6 @@
 import numpy
 
+
 def log_score(p, *args, **kwargs):
     return 1.0 - numpy.log(p)
 
@@ -13,7 +14,7 @@ def prob_score(p, *args, **kwargs):
 
 
 def accuracy_score(p, *args, **kwargs):
-    return 1 if p > 0.5 else 0
+    return 1 if p > 0.5 else 0.5 if p == 0.5 else 0
 
 
 def compute_dcg(seq):
@@ -56,5 +57,3 @@ def compute_ndcg(seq):
 #             for predicted, actual in seq),
 #         reverse=True))
 #     return dcg / idcg
-
-

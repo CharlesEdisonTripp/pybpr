@@ -30,3 +30,6 @@ class NBElement:
     @property
     def probability(self) -> float:
         return self.numerator / self.denominator
+
+    def rescaled(self, weight: float) -> "NBElement":
+        return NBElement(self.probability * weight, weight)

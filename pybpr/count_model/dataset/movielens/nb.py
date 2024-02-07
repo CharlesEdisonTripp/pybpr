@@ -1,3 +1,4 @@
+from typing import Dict
 import pandas
 from pybpr.count_model.assessor.naive_bayes import NaiveBayes
 from pybpr.count_model.dataset.movielens.data import *
@@ -15,7 +16,8 @@ def dataset_loc(
     if len(index) > 0:
         try:
             return dataframe.loc[index, :]
-        except KeyError:
+        except KeyError as e:
+            # print(e)
             pass
     return pandas.DataFrame(columns=dataframe.columns)
 
@@ -30,6 +32,7 @@ def make_nb_prior(
         num_matching = len(
             dataset_loc(ratings_by_item, (query.object, query.verb, timestamp_range))
         )
+
         num_opposite = len(
             dataset_loc(
                 ratings_by_item, (query.object, not query.verb, timestamp_range)
@@ -126,8 +129,61 @@ def make_interaction_factors_accessor(
 
 def make_genre_factors_accessor(
     movies: pandas.DataFrame,
-    ratings_by_user: pandas.DataFrame,
+    ratings_by_time: pandas.DataFrame,
+    ratings_by_genre: Dict[str, pandas.DataFrame],
     interaction_prior: NBElement,
+) -> Callable[[Interaction], Iterable[NBFactor]]:
+    def get_factors(query: Interaction) -> Iterable[NBFactor]:
+        timestamp_range = slice(None, query.timestamp - 1)
+        matching_ratings = dataset_loc(ratings_by_time, (timestamp_range, query.verb))
+        non_matching_ratings = dataset_loc(
+            ratings_by_time, (timestamp_range, not query.verb)
+        )
+
+        movie = movies.loc[query.object]
+        factors = []
+        for genre in category_columns:
+            movie_in_genre = movie[genre]
+
+            genre_ratings = ratings_by_genre[genre]
+
+            # P(genre matches | same rating)
+            # of all occourances of this rating, what proportion had this genre?
+            matching_factor = interaction_prior + NBElement(
+                len(
+                    dataset_loc(
+                        genre_ratings, (movie_in_genre, query.verb, timestamp_range)
+                    )
+                ),
+                len(matching_ratings),
+            )
+
+            # P(genre matches | opposite rating)
+            # of all occourances of the opposite rating, what proportion had this genre?
+            not_matching_factor = interaction_prior + NBElement(
+                len(
+                    dataset_loc(
+                        genre_ratings, (movie_in_genre, not query.verb, timestamp_range)
+                    )
+                ),
+                len(non_matching_ratings),
+            )
+
+            factor = NBFactor(matching_factor, not_matching_factor)
+            # print(f"genre: {genre}, movie_in_genre {movie_in_genre}, factor: {factor}")
+
+            factors.append(factor)
+        return factors
+
+    return get_factors
+
+
+def make_personalized_genre_factors_accessor(
+    movies: pandas.DataFrame,
+    ratings_by_user: pandas.DataFrame,
+    # interaction_prior: NBElement,
+    factor_prior_accessor: Callable[[Interaction], Iterable[NBFactor]],
+    prior_weight: float,
 ) -> Callable[[Interaction], Iterable[NBFactor]]:
     def get_factors(query: Interaction) -> Iterable[NBFactor]:
         timestamp_range = slice(None, query.timestamp - 1)
@@ -142,18 +198,21 @@ def make_genre_factors_accessor(
             users_previous_ratings["positive"] != query.verb
         ]
 
-        print(
-            f"query: {query}, matching: {len(users_previous_matching_ratings)}, nonmatching: {len(users_previous_nonmatching_ratings)}"
-        )
+        # print(
+        #     f"query: {query}, matching: {len(users_previous_matching_ratings)}, nonmatching: {len(users_previous_nonmatching_ratings)}"
+        # )
 
+        prior_factors = factor_prior_accessor(query)
         movie = movies.loc[query.object]
         # print(movie)
         factors = []
-        for genre in category_columns:
+        for genre, prior_factor in zip(category_columns, prior_factors):
             movie_in_genre = movie[genre]
             # P(genre matches | same rating)
             # of all occourances of this rating, what proportion had this genre?
-            matching_factor = interaction_prior + NBElement(
+            matching_factor = prior_factor.positive_element.rescaled(
+                prior_weight
+            ) + NBElement(
                 len(
                     users_previous_matching_ratings[
                         users_previous_matching_ratings[genre] == movie_in_genre
@@ -161,14 +220,12 @@ def make_genre_factors_accessor(
                 ),
                 len(users_previous_matching_ratings),
             )
-            # matching_factor = interaction_prior + NBElement(
-            #     100,
-            #     100,
-            # )
 
             # P(genre matches | opposite rating)
             # of all occourances of the opposite rating, what proportion had this genre?
-            not_matching_factor = interaction_prior + NBElement(
+            not_matching_factor = prior_factor.negative_element.rescaled(
+                prior_weight
+            ) + NBElement(
                 len(
                     users_previous_nonmatching_ratings[
                         users_previous_nonmatching_ratings[genre] == movie_in_genre
@@ -176,10 +233,9 @@ def make_genre_factors_accessor(
                 ),
                 len(users_previous_nonmatching_ratings),
             )
-            # not_matching_factor = interaction_prior + NBElement(0, 100)
 
             factor = NBFactor(matching_factor, not_matching_factor)
-            print(f"genre: {genre}, movie_in_genre {movie_in_genre}, factor: {factor}")
+            # print(f"genre: {genre}, movie_in_genre {movie_in_genre}, factor: {factor}")
 
             factors.append(factor)
         return factors
@@ -192,7 +248,7 @@ def make_assess_nb(
     factor_generators: List[Callable[[Interaction], Iterable[NBFactor]]],
 ):
     def assess(interaction: Interaction) -> float:
-        p = factored_naive_bayes.compute_naive_bayes(
+        return factored_naive_bayes.compute_naive_bayes(
             prior_assesor(interaction).probability,
             itertools.chain.from_iterable(
                 (
@@ -201,8 +257,5 @@ def make_assess_nb(
                 )
             ),
         )
-
-        # print(f"target: {target_event.verb} {p}")
-        return p
 
     return assess
