@@ -10,13 +10,22 @@ import numpy
 def compute_naive_bayes(
     prior_probability: float,
     factors: Iterable[NBFactor],
-    bound: float = 1e-6,
+    bound: float = 1e-9,
 ):
     log_odds = numpy.log(prior_probability) - numpy.log(1.0 - prior_probability)
-
+    # print(f"prior log_odds: {log_odds}")
     for factor in factors:
-        log_odds += numpy.log(factor.likelihood) - numpy.log(factor.negative_likelihood)
+        # print(f"factor: {factor}")
+        # log_odds += numpy.log(factor.likelihood) - numpy.log(factor.negative_likelihood)
+        log_odds += (
+            numpy.log(factor.positive_element.numerator)
+            - numpy.log(factor.positive_element.denominator)
+        ) - (
+            numpy.log(factor.negative_element.numerator)
+            - numpy.log(factor.negative_element.denominator)
+        )
         # mathematically the same as: odds *= P(+A | +B) / P(+A | -B) = (P(+A & +B) / P(A & + B)) / (P(+A & -B) / P(A & -B))
+    # print(f"log_odds: {log_odds}")
     odds = numpy.exp(log_odds)
     p = odds / (1 + odds)  # P(+B | +A)
     return max(bound, min(1.0 - bound, p))

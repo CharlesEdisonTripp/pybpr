@@ -9,6 +9,10 @@ def get_user_set(ratings):
     return ratings["user_id"].drop_duplicates().sort_values()
 
 
+def get_user_set2(ratings):
+    return ratings["user_id"]
+
+
 def dataset_loc(
     dataframe,
     index,
@@ -30,20 +34,49 @@ def make_nb_prior(
         # P(rating | all ratings on this movie)
         timestamp_range = slice(None, query.timestamp - 1)
         num_matching = len(
-            dataset_loc(ratings_by_item, (query.object, query.verb, timestamp_range))
+            dataset_loc(
+                ratings_by_item, (query.object, query.verb, timestamp_range)
+            ).index
         )
 
         num_opposite = len(
             dataset_loc(
                 ratings_by_item, (query.object, not query.verb, timestamp_range)
-            )
+            ).index
         )
-        # num_positive = len(
-        #     ratings_by_item.loc[query.object, query.verb, timestamp_range]
-        # )  # type: ignore
-        # num_negative = len(
-        #     ratings_by_item.loc[query.object, not query.verb, timestamp_range]
-        # )  # type: ignore
+
+        return global_prior + NBElement(num_matching, num_opposite + num_matching)
+
+    return get_nb_prior
+
+
+def get_count(dataframe, index) -> int:
+    if len(index) > 0:
+        try:
+            s = dataframe.loc[index, "count"]
+            if len(s) > 0:
+                return s.iloc[-1]
+        except KeyError as e:
+            pass
+    return 0
+
+
+def make_nb_prior_with_cumulative_sums(
+    per_item_interaction_counts: pandas.DataFrame,
+    global_prior: NBElement,
+) -> Callable[[Interaction], NBElement]:
+    def get_nb_prior(query: Interaction) -> NBElement:
+        # P(rating | all ratings on this movie)
+        timestamp_range = slice(None, query.timestamp - 1)
+
+        num_matching = get_count(
+            per_item_interaction_counts,
+            pandas.IndexSlice[query.object, query.verb, timestamp_range],
+        )
+        num_opposite = get_count(
+            per_item_interaction_counts,
+            pandas.IndexSlice[query.object, not query.verb, timestamp_range],
+        )
 
         return global_prior + NBElement(num_matching, num_opposite + num_matching)
 
@@ -51,10 +84,113 @@ def make_nb_prior(
 
 
 def make_interaction_factors_accessor(
+    interaction_prior: NBElement,
+    ratings_by_user: pandas.DataFrame,
+    ratings_by_item_user: pandas.DataFrame,
+) -> Callable[[Interaction], Iterable[NBFactor]]:
+    def get_interaction_factors(query: Interaction) -> Iterable[NBFactor]:
+        timestamp_range = slice(None, query.timestamp - 1)
+        users_previous_ratings = dataset_loc(
+            ratings_by_user, (query.subject, timestamp_range)
+        )
+        # previous_ratings = ratings[ratings['timestamp'] < interaction.timestamp]
+        factors = []
+
+        def time_filter(df):
+            return df.loc[df["timestamp"] < query.timestamp]
+
+        # previous ratings of this item
+        matching_ratings = time_filter(
+            dataset_loc(
+                ratings_by_item_user,
+                (
+                    query.object,
+                    query.verb,
+                    slice(None),
+                ),
+            )
+        )["user_id"]
+
+        nonmatching_ratings = time_filter(
+            dataset_loc(
+                ratings_by_item_user,
+                (
+                    query.object,
+                    not query.verb,
+                    slice(None),
+                ),
+            )
+        )["user_id"]
+
+        for (
+            row_index,
+            row,
+        ) in users_previous_ratings.iterrows():  # for each previous rating on a movie
+            previous_interaction = make_user_item_interaction(row)
+
+            def make_element(
+                matching_ratings,
+            ) -> NBElement:
+                other_item_matching_ratings = len(
+                    time_filter(
+                        dataset_loc(
+                            ratings_by_item_user,
+                            (
+                                previous_interaction.object,
+                                previous_interaction.verb,
+                                matching_ratings,
+                                # timestamp_range,
+                            ),
+                        )
+                    ).index
+                )
+
+                other_item_nonmatching_ratings = len(
+                    time_filter(
+                        dataset_loc(
+                            ratings_by_item_user,
+                            (
+                                previous_interaction.object,
+                                not previous_interaction.verb,
+                                matching_ratings,
+                                # timestamp_range,
+                            ),
+                        )
+                    ).index
+                )
+
+                return interaction_prior + NBElement(
+                    other_item_matching_ratings,
+                    other_item_matching_ratings + other_item_nonmatching_ratings,
+                )
+
+            factors.append(
+                NBFactor(
+                    # P(previous rating | same rating)
+                    # of all occourances of this rating, what proportion co-occoured with previous rating?
+                    # num prev rating & this rating  / (num this rating & either prev ratings)
+                    # overall set occourances of a rating on both items
+                    # positive ratio filters by occourances of this rating
+                    # get coocourances of this rating and a rating on this item
+                    make_element(matching_ratings),
+                    # P(previous rating | oppostie rating)
+                    # of all occourances of the opposite rating, what proportion co-occoured with previous rating?
+                    # num prev rating & opposite rating  / (num opposite rating & either prev ratings)
+                    make_element(
+                        nonmatching_ratings,
+                    ),
+                )
+            )
+        return factors
+
+    return get_interaction_factors
+
+
+def make_interaction_factors_accessor_prev(
+    interaction_prior: NBElement,
     ratings_by_user: pandas.DataFrame,
     ratings_by_item: pandas.DataFrame,
     ratings_by_item_user: pandas.DataFrame,
-    interaction_prior: NBElement,
 ) -> Callable[[Interaction], Iterable[NBFactor]]:
     def get_interaction_factors(query: Interaction) -> Iterable[NBFactor]:
         timestamp_range = slice(None, query.timestamp - 1)
@@ -65,12 +201,12 @@ def make_interaction_factors_accessor(
         factors = []
 
         # user id's of all users who rated this movie the same
-        matching_ratings = get_user_set(
+        matching_ratings = get_user_set2(
             dataset_loc(ratings_by_item, (query.object, query.verb, timestamp_range))
         )
 
         # user id's of all users who rated this movie differently
-        nonmatching_ratings = get_user_set(
+        nonmatching_ratings = get_user_set2(
             dataset_loc(
                 ratings_by_item, (query.object, not query.verb, timestamp_range)
             )
@@ -96,28 +232,26 @@ def make_interaction_factors_accessor(
                             evidence_observations,
                             timestamp_range,
                         ),
-                    )
+                    ).index
                 )
 
-                return NBElement(
+                return interaction_prior + NBElement(
                     co_occourances,
-                    evidence_observations.size,
+                    len(evidence_observations.index),
                 )
 
             factors.append(
                 NBFactor(
                     # P(previous rating | same rating)
                     # of all occourances of this rating, what proportion co-occoured with previous rating?
-                    interaction_prior
-                    + make_element(
+                    make_element(
                         previous_interaction,
                         matching_ratings,
                     ),
                     # P(previous rating | oppostie rating)
                     # of all occourances of the opposite rating, what proportion co-occoured with previous rating?
-                    interaction_prior
-                    + make_element(
-                        previous_interaction.negative(),
+                    make_element(
+                        previous_interaction,
                         nonmatching_ratings,  # type: ignore
                     ),
                 )
@@ -134,46 +268,67 @@ def make_genre_factors_accessor(
     interaction_prior: NBElement,
 ) -> Callable[[Interaction], Iterable[NBFactor]]:
     def get_factors(query: Interaction) -> Iterable[NBFactor]:
+
+        def filter_out_this_movie(df):
+            return df
+            # return df.loc[df["item_id"] != query.object]
+
         timestamp_range = slice(None, query.timestamp - 1)
-        matching_ratings = dataset_loc(ratings_by_time, (timestamp_range, query.verb))
-        non_matching_ratings = dataset_loc(
-            ratings_by_time, (timestamp_range, not query.verb)
+        matching_ratings = filter_out_this_movie(
+            dataset_loc(ratings_by_time, (query.verb, timestamp_range))
+        )
+
+        non_matching_ratings = filter_out_this_movie(
+            dataset_loc(ratings_by_time, (not query.verb, timestamp_range))
         )
 
         movie = movies.loc[query.object]
         factors = []
         for genre in category_columns:
             movie_in_genre = movie[genre]
+            if not movie_in_genre:
+                continue
 
             genre_ratings = ratings_by_genre[genre]
 
-            # P(genre matches | same rating)
+            # P(genre value | same rating)
             # of all occourances of this rating, what proportion had this genre?
             matching_factor = interaction_prior + NBElement(
                 len(
-                    dataset_loc(
-                        genre_ratings, (movie_in_genre, query.verb, timestamp_range)
-                    )
+                    filter_out_this_movie(
+                        dataset_loc(
+                            genre_ratings,
+                            (movie_in_genre, query.verb, timestamp_range),
+                        )
+                    ).index
                 ),
-                len(matching_ratings),
+                len(matching_ratings.index),
             )
 
-            # P(genre matches | opposite rating)
+            # P(genre value | opposite rating)
             # of all occourances of the opposite rating, what proportion had this genre?
             not_matching_factor = interaction_prior + NBElement(
                 len(
-                    dataset_loc(
-                        genre_ratings, (movie_in_genre, not query.verb, timestamp_range)
-                    )
+                    filter_out_this_movie(
+                        dataset_loc(
+                            genre_ratings,
+                            (movie_in_genre, not query.verb, timestamp_range),
+                        )
+                    ).index
                 ),
-                len(non_matching_ratings),
+                len(non_matching_ratings.index),
             )
 
             factor = NBFactor(matching_factor, not_matching_factor)
             # print(f"genre: {genre}, movie_in_genre {movie_in_genre}, factor: {factor}")
 
+            # print(
+            #     f"rating: {query.verb} genre: {genre}, movie_in_genre {movie_in_genre}, factor: {factor}"
+            # )
             factors.append(factor)
+            break
         return factors
+        # return [NBFactor(NBElement(0.9, 1), NBElement(0.1, 1))]
 
     return get_factors
 
@@ -259,3 +414,36 @@ def make_assess_nb(
         )
 
     return assess
+
+
+def make_item_factor_accessor(
+    interaction_prior: NBElement,
+    ratings_by_item: pandas.DataFrame,
+    ratings_by_time: pandas.DataFrame,
+) -> Callable[[Interaction], Iterable[NBFactor]]:
+    def get_factors(query: Interaction) -> Iterable[NBFactor]:
+        timestamp_range = slice(None, query.timestamp - 1)
+
+        # P(id | rating) / P(id | not rating)
+        # (#ratings with id / # ratings) / (# not ratings with id / # not ratings)
+        matching_factor = interaction_prior + NBElement(
+            len(
+                dataset_loc(
+                    ratings_by_item, (query.object, query.verb, timestamp_range)
+                ).index
+            ),
+            len(dataset_loc(ratings_by_time, (query.verb, timestamp_range)).index),
+        )
+
+        non_matching_factor = interaction_prior + NBElement(
+            len(
+                dataset_loc(
+                    ratings_by_item, (query.object, not query.verb, timestamp_range)
+                ).index
+            ),
+            len(dataset_loc(ratings_by_time, (not query.verb, timestamp_range)).index),
+        )
+
+        return [NBFactor(matching_factor, non_matching_factor)]
+
+    return get_factors

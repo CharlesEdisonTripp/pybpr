@@ -2,7 +2,7 @@ import numpy
 
 
 def log_score(p, *args, **kwargs):
-    return 1.0 - numpy.log(p)
+    return numpy.log(p)
 
 
 def brier_score(p, *args, **kwargs):
