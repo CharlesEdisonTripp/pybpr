@@ -62,6 +62,7 @@ def simple_tokenize_column(col):
 def load_source_data(data_path, regenerate=False):
     output_path = os.path.join(data_path, "output")
     os.makedirs(output_path, exist_ok=True)
+
     outputs = (
         "products",
         "queries",
@@ -71,6 +72,7 @@ def load_source_data(data_path, regenerate=False):
         "users",
     )
     output_paths = [os.path.join(output_path, name + ".pq") for name in outputs]
+
     if regenerate or any(
         (
             not os.path.isfile(os.path.join(output_path, output + ".pq"))
@@ -80,9 +82,9 @@ def load_source_data(data_path, regenerate=False):
         dfs = etl_source_data(data_path)
         for path, df in zip(output_paths, dfs):
             df.write_parquet(
-                os.path.join(output_path, path),
+                path,
                 compression="lz4",
-                compression_level=5,
+                compression_level=9,
                 pyarrow_options={},
             )
     else:
@@ -93,41 +95,6 @@ def load_source_data(data_path, regenerate=False):
 
 def etl_source_data(data_path):
     products = pl.scan_parquet(os.path.join(data_path, f"Products_*.parquet")).lazy()
-    orderitems = pl.scan_parquet(
-        os.path.join(data_path, f"OrderItems_*.parquet")
-    ).lazy()
-    clicks = pl.scan_parquet(os.path.join(data_path, f"Clicks_*.parquet")).lazy()
-
-    users = (
-        pl.concat(
-            [
-                orderitems.select("user_id"),
-                clicks.select("user_id"),
-            ],
-            rechunk=False,
-        )
-        .unique()
-        .sort("user_id")
-    )
-    users = users.with_row_count(name="user_number")
-
-    clicks = clicks.join(users, "user_id").drop("user_id")
-    orderitems = orderitems.join(users, "user_id").drop("user_id")
-
-    products = products.sort("product_id")
-    products = products.with_row_count(name="product_number")
-    # products = products.set_sorted("product_number")
-
-    orderitems = orderitems.join(
-        products.select(["product_id", "product_number"]), "product_id"
-    )
-    orderitems = orderitems.drop("product_id")
-
-    clicks = clicks.join(
-        products.select(["product_id", "product_number"]), "product_id"
-    )
-    clicks = clicks.drop("product_id")
-
     products = products.with_columns(
         pl.col("product_type").cast(pl.Categorical),
         pl.col("subject_score").cast(pl.Float32),
@@ -145,6 +112,64 @@ def etl_source_data(data_path):
         .cast(pl.List(pl.Float32))
         .alias("vision_embedding2"),
     )
+    products = products.sort("product_id")
+    products = products.with_row_count(name="product_number")
+    # products = products.collect_async(streaming=True)
+
+    orderitems = pl.scan_parquet(
+        os.path.join(data_path, f"OrderItems_*.parquet")
+    ).lazy()
+
+    clicks = pl.scan_parquet(os.path.join(data_path, f"Clicks_*.parquet")).lazy()
+
+    users = (
+        pl.concat(
+            [
+                orderitems.select("user_id").unique(),
+                clicks.select("user_id").unique(),
+            ],
+            rechunk=True,
+        )
+        .unique()
+        .sort("user_id")
+    )
+    users = users.with_row_count(name="user_number")
+    # users = users.collect_async(streaming=True)
+
+    # products = (await products).lazy()
+
+    orderitems = orderitems.join(
+        products.select(["product_id", "product_number"]), "product_id"
+    )
+    orderitems = orderitems.drop("product_id")
+
+    clicks = clicks.join(
+        products.select(["product_id", "product_number"]), "product_id"
+    )
+    clicks = clicks.drop("product_id")
+
+    # users = (await users).lazy()
+    orderitems = orderitems.join(users, "user_id").drop("user_id")
+    orderitems = orderitems.sort("date_created")
+
+    clicks = clicks.join(users, "user_id").drop("user_id")
+
+    # products = products.with_columns(pl.col("product_id").alias("product_number")).drop(
+    #     "product_id"
+    # )
+    # products = products.sort("product_id")
+    # products = products.with_row_count(name="product_number")
+    # products = products.set_sorted("product_number")
+
+    # orderitems = orderitems.with_columns(
+    #     pl.col("product_id").alias("product_number")
+    # ).drop("product_id")
+
+    # clicks = clicks.with_columns(pl.col("product_id").alias("product_number")).drop(
+    #     "product_id"
+    # )
+
+    # products = products.collect(streaming=True).lazy()
 
     clicks = clicks.sort(
         [
@@ -172,6 +197,7 @@ def etl_source_data(data_path):
         pl.col("product_number").filter(pl.col("is_click") == 0).alias("pass_numbers"),
         pl.col("product_number").filter(pl.col("is_click") != 0).alias("click_numbers"),
     )
+    del clicks
 
     queries = queries.with_columns(
         pl.col("cleaned_url")
@@ -187,6 +213,17 @@ def etl_source_data(data_path):
             pl.col("cleaned_url").struct["4"].str.replace_all(r"\+", " ")
         ).alias("query"),
     ).drop("cleaned_url")
+    queries = queries.sort("time")
+
+    orderitems, queries, products, users = tuple(
+        (
+            df.lazy()
+            for df in pl.collect_all(
+                [orderitems, queries, products, users],
+                streaming=True,
+            )
+        )
+    )
 
     token_map = (
         pl.concat(
@@ -202,24 +239,17 @@ def etl_source_data(data_path):
         .group_by("token")
         .len()
         .sort("token")
-    )
+    ).collect(streaming=True)
 
-    products = products.sort("product_number")
-    queries = queries.sort("time")
-    orderitems = orderitems.sort("date_created")
-
-    token_map, products, orderitems, queries, users = tuple(
-        pl.collect_all([token_map, products, orderitems, queries, users])
-    )
     # token_map = token_map.collect()
     token_map = token_map.with_columns(
         pl.col("token").map_elements(stem_token).alias("stem")
     )
     token_map = token_map.lazy()
-    products = products.lazy()
-    queries = queries.lazy()
-    orderitems = orderitems.lazy()
-    users = users.lazy()
+    # products = products.lazy()
+    # queries = queries.lazy()
+    # orderitems = orderitems.lazy()
+    # users = users.lazy()
 
     feature_map = (
         token_map.select(pl.col("stem"), pl.col("len"))
@@ -228,6 +258,7 @@ def etl_source_data(data_path):
         .sort("count", descending=True)
     )
     feature_map = feature_map.with_row_count(name="feature_id")
+    feature_map = feature_map.collect(streaming=True).lazy()
     # feature_map = feature_map.set_sorted("feature_id")
 
     token_map = token_map.drop("len")
@@ -243,6 +274,10 @@ def etl_source_data(data_path):
 
     # return products.collect(), queries.collect()
     # feature_map = feature_map.set_sorted("feature_id")
+
     return tuple(
-        pl.collect_all([products, queries, token_map, feature_map, orderitems, users])
+        pl.collect_all(
+            [products, queries, token_map, feature_map, orderitems, users],
+            streaming=True,
+        )
     )
