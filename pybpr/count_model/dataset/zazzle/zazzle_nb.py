@@ -34,13 +34,14 @@ from nltk.tokenize import word_tokenize
 class TableInfo:
     name: str
     sort_by: Optional[str]
+    partition: bool
     output_path: str
     df: Optional[Union[pl.LazyFrame, pl.DataFrame]] = None
     estimated_size: Optional[int] = None
 
     @property
     def path(self) -> str:
-        return os.path.join(self.output_path, self.name)
+        return os.path.join(self.output_path, self.name + "_0.parquet")
 
 
 async def load_source_data(data_path, regenerate=False):
@@ -48,13 +49,13 @@ async def load_source_data(data_path, regenerate=False):
     os.makedirs(output_path, exist_ok=True)
 
     tables = [
-        TableInfo("products", "product_number", output_path),
-        TableInfo("queries", "query_id", output_path),
-        TableInfo("interactions", "date_created", output_path),
-        TableInfo("token_map", None, output_path),
-        TableInfo("feature_map", None, output_path),
-        TableInfo("orderitems", "date_created", output_path),
-        TableInfo("users", "user_number", output_path),
+        TableInfo("products", "product_num", True, output_path),
+        TableInfo("queries", "query_num", True, output_path),
+        TableInfo("interactions", "date_created", True, output_path),
+        TableInfo("token_map", "token", False, output_path),
+        TableInfo("feature_map", "feature_num", True, output_path),
+        TableInfo("orderitems", "date_created", True, output_path),
+        TableInfo("users", "user_num", True, output_path),
     ]
 
     if regenerate or any(
@@ -80,7 +81,8 @@ async def load_source_data(data_path, regenerate=False):
     #     )
     # )
     for table in tables:
-        load_range_partitions(table)
+        # load_range_partitions(table)
+        load_table(table)
 
     return tables
 
@@ -96,6 +98,8 @@ def collect_tables(tables: List[TableInfo]):
 
 
 async def etl_source_data(data_path: str, tables: List[TableInfo]):
+    table_map = {table.name: table for table in tables}
+
     products = pl.scan_parquet(
         os.path.join(data_path, f"Products_*.parquet"),
         low_memory=True,
@@ -115,7 +119,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     token_counts = [f"{col}_count" for col in ["title", "long_description", "query"]]
     token_count_cols = [pl.col(col) for col in token_counts]
 
-    print(f"Begin queries collection 1...")
+    # print(f"Begin queries collection 1...")
     queries = (
         clicks.select(pl.col("cleaned_url"))
         .group_by("cleaned_url")
@@ -123,70 +127,43 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         # .agg()
         # .first()
         # .unique()
-        # .sort("cleaned_url")
-        # .with_row_index("query_id")
+        .sort("cleaned_url")
+        # .with_row_index("query_num")
+        # .set_sorted("query_num")
         # .collect(streaming=True)
         # .lazy()
     )
     # print(f"done.")
 
     # print(f"Begin queries collection 2...")
-    # queries = queries.with_row_index("query_id").collect().lazy()
+    # queries = queries.with_row_index("query_num").collect().lazy()
     # print(f"done.")
 
     # print(f"Begin queries tokenization collection...")
     query_url_groups = pl.col("cleaned_url").str.extract_groups(
-        r"https://([^/]+)/(:?(\w+)/)(.*)"
+        r"https:\/\/([^\/]+)\/(([^\/]+)\/)?(.*)"
     )
     queries = (
         queries.with_columns(
             query_url_groups.struct["3"].cast(pl.Categorical).alias("category"),
             # query_url_groups.struct["4"].str.replace_all(r"\+", " ").alias("query"),
-            query_url_groups.struct["4"].alias("query"),
+            query_url_groups.struct["4"].str.replace_all(r"\+", " ").alias("query"),
             # simple_tokenize_column(
             #     query_url_groups.struct["4"].str.replace_all(r"\+", " ")
             # ).alias("query"),
         )
-        .with_row_index("query_id")
+        # .sort("query_count", descending=True)
+        # .sort("cleaned_url")
+        .with_row_index("query_num").set_sorted("query_num")
         # .drop("cleaned_url")
-        .collect()
-        .lazy()
     )
+    print(queries.explain(streaming=True))
+    # queries = queries.sink_csv(table_map["queries"].path + "_0.parquet")
+    # queries = queries.collect(streaming=True).lazy()
+    queries = save_table(table_map["queries"], queries, streaming=True)
     print(f"done.")
 
     print(f"Begin token_map collection 1...")
-
-    def get_tokens(
-        df: pl.LazyFrame,
-        col,
-        count_col,
-        sum_count=False,
-    ) -> pl.LazyFrame:
-        token = simple_tokenize_column(pl.col(col)).alias("token")
-        if sum_count:
-            return (
-                df.select(
-                    token,
-                    pl.col(count_col),
-                )
-                .explode("token")
-                .group_by("token")
-                .agg(pl.col(count_col).sum().alias(count_col))
-            )
-        return df.select(token).explode("token").group_by("token").len(name=count_col)
-
-    def join_tokens(
-        left: pl.LazyFrame,
-        df: pl.LazyFrame,
-        col,
-        count_col,
-        sum_count=False,
-    ) -> pl.LazyFrame:
-        return left.join(
-            get_tokens(df, col, count_col, sum_count),
-            "token",
-            how="outer_coalesce",
-        ).with_columns(pl.col(count_col).fill_null(0))
 
     token_map = join_tokens(
         join_tokens(
@@ -228,10 +205,16 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     #     .lazy()
     # )
 
-    token_map = token_map.collect()
-    token_map = token_map.with_columns(
-        pl.col("token").map_elements(stem_token, return_dtype=pl.Utf8).alias("stem")
-    ).lazy()
+    token_map = token_map.sort("token")
+    print(token_map.explain(streaming=True))
+    token_map = token_map.collect(streaming=True)
+    token_map = (
+        token_map.with_columns(
+            pl.col("token").map_elements(stem_token, return_dtype=pl.Utf8).alias("stem")
+        )
+        .drop_nulls("stem")
+        .lazy()
+    )
     print(f"done.")
 
     feature_map = (
@@ -240,35 +223,44 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         .agg([col.sum() for col in token_count_cols])
         .sort(token_count_cols[2], descending=True)
     )
-    feature_map = feature_map.with_row_index(name="feature_id").set_sorted("feature_id")
+    feature_map = feature_map.with_row_index(name="feature_num").set_sorted(
+        "feature_num"
+    )
 
     # print(f"Begin feature_map collection...")
     # feature_map = feature_map.collect().lazy()
     # print(f"done.")
 
-    token_map = token_map.join(feature_map.select("stem", "feature_id"), "stem")
+    token_map = token_map.join(feature_map.select("stem", "feature_num"), "stem").drop(
+        "stem"
+    )
 
     print(f"Begin token_map, feature_map collection...")
     token_map, feature_map = pl.collect_all([token_map, feature_map])
-    # token_dict = {k: v for k, v in zip(token_map["token"], token_map["feature_id"])}
-
+    # token_dict = {k: v for k, v in zip(token_map["token"], token_map["feature_num"])}
+    # token_mapping = (token_map["token"].to_numpy(), token_map["feature_num"].to_numpy())
     # token_map = token_map.lazy()
-    feature_map = feature_map.lazy()
+    # feature_map = feature_map.lazy()
+    feature_map = save_table(table_map["feature_map"], feature_map)
     print(f"done.")
 
     print(f"Begin query stem mapping...")
+    # queries = queries.with_row_index("query_num").set_sorted("query_num")
     queries = (
         stem_column(
             token_map["token"],
-            token_map["feature_id"],
+            token_map["feature_num"],
             queries,
-            "query_id",
+            "query_num",
             "query",
             "query",
         )
-        .collect(streaming=True)
-        .lazy()
+        .drop("query")
+        .rename({"query_right": "query"})
     )
+    queries = save_table(table_map["queries"], queries, streaming=True)
+    # print(queries.explain(streaming=True))
+    # queries = queries.collect(streaming=True)
     print(f"done.")
 
     print(f"Begin product stem mapping...")
@@ -292,9 +284,8 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     )
 
     products = stem_column(
-        # token_dict,
         token_map["token"],
-        token_map["feature_id"],
+        token_map["feature_num"],
         products,
         "product_id",
         "title",
@@ -303,9 +294,8 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
 
     products = (
         stem_column(
-            # token_dict,
             token_map["token"],
-            token_map["feature_id"],
+            token_map["feature_num"],
             products,
             "product_id",
             "long_description",
@@ -315,18 +305,20 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         # .lazy()
     ).drop("long_description")
 
-    token_map = token_map.lazy()
+    products = products.sort("product_id")
+    products = products.with_row_index(name="product_num").set_sorted("product_num")
 
-    # products = products.sort("product_id")
-    products = products.with_row_index(name="product_number").set_sorted(
-        "product_number"
-    )
+    products = save_table(table_map["products"], products)
 
-    print(f"Begin product collection 1...")
-    products = products.collect()
-    print(f"products size: {products.estimated_size() / 1024**2}")
-    products = products.lazy()
-    print(f"done.")
+    token_map = save_table(table_map["token_map"], token_map)
+    # print(f"Begin product collection 1...")
+    # print(products.explain())
+    # # products = products.collect(streaming=True)
+    # products = products.collect().lazy()
+    # print(f"products size: {products.estimated_size() / 1024**2}")
+
+    # products = products.lazy()
+    # print(f"done.")
 
     users = (
         pl.concat(
@@ -342,131 +334,144 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         .sort("user_id")
     )
 
-    print(f"Begin users collection 1...")
-    users = users.collect(streaming=True).lazy()
-    print(f"done.")
-    print(f"Begin users collection 2...")
-    users = (
-        users.with_row_index(name="user_number")
-        .set_sorted("user_number")
-        .collect()
-        .lazy()
-    )
-    print(f"done.")
+    # print(f"Begin users collection 1...")
+    # users = users.collect(streaming=True).lazy()
+    # print(f"done.")
+    # print(f"Begin users collection 2...")
+    users = users.with_row_index(name="user_num").set_sorted("user_num")
+    users = save_table(table_map["users"], users, streaming=True)
+    # print(f"done.")
     # products, users = (df.lazy() for df in pl.collect_all([products, users]))
 
     # clicks = clicks.with_columns(pl.col("cleaned_url").replace())
-    clicks = clicks.join(queries, "cleaned_url").drop("cleaned_url")
+    # clicks = clicks.join(queries, "cleaned_url").drop("cleaned_url")
 
     # replace user id (string) and product id (int64) with user number (uint32) and product number (uint32)
-    orderitems, clicks = tuple(
-        (
-            replace_id_with_number(
-                replace_id_with_number(
-                    df,
-                    "user_id",
-                    "user_number",
-                    users,
-                ),
-                "product_id",
-                "product_number",
-                products,
-            )
-            for df in [orderitems, clicks]
-        )
+    # user_id_to_num = pl.col("user_id").replace(
+    #     users["user_id"].to_list(),
+    #     users["user_num"].to_list(),
+    #     return_dtype=pl.UInt32,
+    # )
+    # product_id_to_num = pl.col("product_id").replace(
+    #     products["product_id"].to_list(),
+    #     products["product_num"].to_list(),
+    #     return_dtype=pl.UInt32,
+    # )
+    # user_product_map_rename = {
+    #     "product_id": "product_num",
+    #     "user_id": "user_num",
+    # }
+
+    # orderitems = orderitems.with_columns(user_id_to_num, product_id_to_num)
+    # orderitems = orderitems.rename(user_product_map_rename)
+    orderitems = (
+        orderitems.join(users.select("user_id", "user_num"), "user_id")
+        .drop("user_id")
+        .join(products.select("product_id", "product_num"), "product_id")
+        .drop("product_id")
     )
 
     orderitems = orderitems.sort("date_created")
-    print(f"Begin orderitems collection 1...")
-    orderitems = orderitems.collect(streaming=True).lazy()
-    print(f"done.")
+    orderitems = save_table(table_map["orderitems"], orderitems, streaming=True)
+
+    # print(f"Begin orderitems collection 1...")
+    # orderitems = orderitems.collect(streaming=True).lazy()
+    # print(f"done.")
+
+    clicks = (
+        clicks.join(users.select("user_id", "user_num"), "user_id")
+        .drop("user_id")
+        .join(products.select("product_id", "product_num"), "product_id")
+        .drop("product_id")
+        .join(queries.select("cleaned_url", "query_num"), "cleaned_url")
+        .drop("cleaned_url")
+    )
+    # clicks = clicks.with_columns(
+    #     user_id_to_num,
+    #     product_id_to_num,
+    #     pl.col("cleaned_url").replace(
+    #         # queries["cleaned_url"],
+    #         # queries["query_num"],
+    #         queries.select("cleaned_url"),
+    #         queries.select("query_num"),
+    #         return_dtype=pl.UInt32,
+    #     ),
+    # )
+    # clicks = clicks.rename(user_product_map_rename | {"cleaned_url": "query_num"})
 
     clicks = clicks.sort(
-        [
-            "user_number",
-            "query_id",
-            "date_created",
-            # "product_number",
-        ]
+        "user_num",
+        "query_num",
+        "date_created",
+        "product_num",
     )
 
-    print(f"Begin clicks collection...")
-    print(clicks.explain(streaming=True))
-    clicks = clicks.collect(streaming=True)
-    print(f"clicks: {clicks.estimated_size() / 1024**2}")
-    clicks = clicks.lazy()
-    print(f"done.")
-
-    # interactions = clicks.rolling(
-    #     index_column="date_created",
-    #     period="5m",
-    #     offset="0s",
-    #     closed="right",
-    #     group_by=[
-    #         "query_id",
-    #         "user_number",
-    #     ],
-    #     # check_sorted=True,
-    # ).agg(
-    #     # pl.col("query_id").first(),
-    #     # pl.col("user_number").first(),
-    #     # pl.col("date_created").first().alias("time"),
-    #     pl.col("product_number").filter(pl.col("is_click") == 0).alias("pass_numbers"),
-    #     pl.col("product_number").filter(pl.col("is_click") != 0).alias("click_numbers"),
-    # )
-
-    # print(f"Begin clicks collection...")
-    # clicks = clicks.collect(streaming=True).lazy()
-    # print(f"done.")
+    clicks = clicks.with_columns(
+        (
+            pl.col("date_created").diff(-1, null_behavior="ignore").fill_null(0)
+            > (5 * 60 * 1e3)
+        )
+        .cum_sum()
+        .over(["user_num", "query_num"])
+        .alias("interaction_num")
+    )
 
     # clicks = clicks.with_columns(
     #     (pl.col("date_created").diff(-1) > (5 * 60 * 1e3))
     #     .cum_sum()
-    #     .over(["query_id", "user_number"])
-    #     .alias("query_number")
+    #     .alias("interaction_num"),
+    # )
+    # clicks = clicks.with_columns(
+    #     (
+    #         (pl.col("query_num") != pl.col("query_num").shift(-1))
+    #         | (pl.col("user_num") != pl.col("user_num").shift(-1))
+    #         | (pl.col("date_created").diff(-1) > (5 * 60 * 1e3))
+    #     )
+    #     .cum_sum()
+    #     .alias("interaction_num")
     # )
 
-    # clicks = clicks.group_by(
-    #     [pl.col("user_number"), pl.col("query_id")]
-    # )
-
-    # print(f"Begin clicks collection 2...")
-    # clicks = clicks.collect().lazy()
-    # print(f"done.")
-
-    clicks = clicks.with_columns(
-        (
-            (pl.col("query_id") != pl.col("query_id").shift(-1))
-            | (pl.col("user_number") != pl.col("user_number").shift(-1))
-            | (pl.col("date_created").diff(-1) > (5 * 60 * 1e3))
-        )
-        .cum_sum()
-        .alias("interaction_id")
+    clicks = clicks.sort(
+        "user_num",
+        "query_num",
+        "interaction_num",
+        "product_num",
     )
 
-    interactions = clicks.group_by("interaction_id").agg(
-        pl.col("query_id").first(),
-        pl.col("user_number").first(),
+    interactions = clicks.group_by(
+        "user_num",
+        "query_num",
+        "interaction_num",
+        maintain_order=True,
+    ).agg(
+        # pl.col("query_num").first(),
+        # pl.col("user_num").first(),
         pl.col("date_created").first(),
-        pl.col("product_number").filter(pl.col("is_click") == 0).alias("pass_numbers"),
-        pl.col("product_number").filter(pl.col("is_click") != 0).alias("click_numbers"),
+        pl.col("product_num")
+        .filter(pl.col("is_click") == 0)
+        .drop_nulls()
+        .alias("pass_nums"),
+        pl.col("product_num")
+        .filter(pl.col("is_click") != 0)
+        .drop_nulls()
+        .alias("click_nums"),
     )
-
-    interactions = interactions.drop("interaction_id")
-    interactions = interactions.with_columns(
-        pl.col("pass_numbers").list.sort(),
-        pl.col("click_numbers").list.sort(),
-    )
+    interactions = interactions.drop("interaction_num")
+    # interactions = interactions.with_columns(
+    #     pl.col("pass_nums").list.sort(),
+    #     pl.col("click_nums").list.sort(),
+    # )
 
     interactions = interactions.sort("date_created")
 
     # queries = queries.collect(streaming=True).lazy()
 
-    print(f"Begin interactions collection...")
-    print(interactions.explain())
-    interactions = interactions.collect()
-    print(f"interactions: {interactions.estimated_size() / 1024**2}")
-    interactions = interactions.lazy()
+    interactions = save_table(table_map["interactions"], interactions, streaming=False)
+    # print(f"Begin interactions collection...")
+    # print(interactions.explain())
+    # interactions = interactions.collect()
+    # print(f"interactions: {interactions.estimated_size() / 1024**2}")
+    # interactions = interactions.lazy()
     # orderitems, queries = (
     #     df.lazy()
     #     for df in pl.collect_all(
@@ -474,24 +479,64 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     #         # streaming=True,
     #     )
     # )
+    # print(f"done.")
+
+    # for name, df in [
+    #     ("products", products.lazy()),
+    #     ("queries", queries.lazy()),
+    #     ("interactions", interactions),
+    #     ("token_map", token_map.lazy()),
+    #     ("feature_map", feature_map),
+    #     ("orderitems", orderitems),
+    #     ("users", users.lazy()),
+    # ]:
+    #     table = table_map[name]
+    #     table.df = df
+
+    # print(f"Begin save tables...")
+    # save_tables(tables)
     print(f"done.")
 
-    table_map = {table.name: table for table in tables}
-    for name, df in [
-        ("products", products),
-        ("queries", queries),
-        ("interactions", interactions),
-        ("token_map", token_map),
-        ("feature_map", feature_map),
-        ("orderitems", orderitems),
-        ("users", users),
-    ]:
-        table = table_map[name]
-        table.df = df
 
-    print(f"Begin save tables...")
-    save_tables(tables)
-    print(f"done.")
+def get_tokens(
+    df: pl.LazyFrame,
+    col,
+    count_col,
+    sum_count=False,
+) -> pl.LazyFrame:
+    token = simple_tokenize_column(pl.col(col)).alias("token")
+    if sum_count:
+        return (
+            df.select(
+                token,
+                pl.col(count_col),
+            )
+            .explode("token")
+            .drop_nulls("token")
+            .group_by("token")
+            .agg(pl.col(count_col).sum().alias(count_col))
+        )
+    # return df.select(token.explode()).group_by("token").len(name=count_col)
+    return (
+        df.select(token.explode())
+        .drop_nulls("token")
+        .group_by("token")
+        .len(name=count_col)
+    )
+
+
+def join_tokens(
+    left: pl.LazyFrame,
+    df: pl.LazyFrame,
+    col,
+    count_col,
+    sum_count=False,
+) -> pl.LazyFrame:
+    return left.join(
+        get_tokens(df, col, count_col, sum_count),
+        "token",
+        how="outer_coalesce",
+    ).with_columns(pl.col(count_col).fill_null(0))
 
 
 _stemmer = PorterStemmer()
@@ -501,13 +546,13 @@ def stem_token(token):
     return _stemmer.stem(token)
 
 
-#  stem_column(
-#             token_dict,
-#             queries,
-#             "query_id",
-#             "query",
-#             "query",
-#         )
+# queries = stem_column(
+#     *token_mapping,
+#     queries,
+#     "query_num",
+#     "query",
+#     "query",
+# )
 
 
 def stem_column(
@@ -522,7 +567,7 @@ def stem_column(
     stems = (
         df.select(
             pl.col(row_id),
-            simple_tokenize_column(pl.col(source_column)).alias(stems_column),
+            simple_tokenize_column(pl.col(source_column).alias(stems_column)),
         )
         .explode(stems_column)
         .with_columns(
@@ -535,6 +580,43 @@ def stem_column(
         stems,
         row_id,
     )
+
+    # return df.with_columns(
+    #     simple_tokenize_column(pl.col(source_column))
+    #     .alias(stems_column)
+    #     .list.explode()
+    #     .replace(source, dest, return_dtype=pl.UInt32)
+    #     .implode()
+    #     .over(row_id),
+    # )
+    # return df.with_columns(
+    #     simple_tokenize_column(pl.col(source_column))
+    #     .list.eval(
+    #         pl.element().replace(source, dest, return_dtype=pl.UInt32),
+    #         # parallel=True,
+    #     )
+    #     .alias(stems_column),
+    # )
+
+    # stems = (
+    #     df.select(
+    #         pl.col(row_id),
+    #         pl.col(source_column).alias(stems_column),
+    #     )
+    #     .with_columns(
+    #         simple_tokenize_column(pl.col(stems_column)),
+    #     )
+    #     .explode(stems_column)
+    #     .with_columns(
+    #         pl.col(stems_column).replace(source, dest, return_dtype=pl.UInt32)
+    #     )
+    #     .group_by(row_id, maintain_order=True)
+    #     .agg(pl.col(stems_column))
+    # )
+    # return df.join(
+    #     stems,
+    #     row_id,
+    # )
     # return (
     #     df.with_columns(
     #         simple_tokenize_column(pl.col(source_column)).alias(stems_column)
@@ -548,7 +630,7 @@ def stem_column(
     #     .agg(pl.col(stems_column))
     # )
 
-    # token_map, products, "product_number", "title_stems", "feature_id"
+    # token_map, products, "product_num", "title_stems", "feature_num"
     # stems = (
     #     df.select(
     #         pl.col(row_id),
@@ -557,10 +639,10 @@ def stem_column(
     #         .explode()
     #         .replace(token_dict, return_dtype=pl.UInt32)
     #     )
-    #     # .join(token_map.select(pl.col("feature_id"), pl.col("token")), "token")
+    #     # .join(token_map.select(pl.col("feature_num"), pl.col("token")), "token")
     #     .group_by(row_id, maintain_order=True)
     #     .agg(
-    #         pl.col("feature_id").alias(stems_column),
+    #         pl.col("feature_num").alias(stems_column),
     #         # pl.len().alias(column + "_count"),
     #     )
     # )
@@ -575,10 +657,10 @@ def stem_column(
     #         pl.col(row_id),
     #         simple_tokenize_column(pl.col(source_column)).alias("token").explode(),
     #     )
-    #     .join(token_map.select(pl.col("feature_id"), pl.col("token")), "token")
+    #     .join(token_map.select(pl.col("feature_num"), pl.col("token")), "token")
     #     .group_by(row_id)
     #     .agg(
-    #         pl.col("feature_id").alias(stems_column),
+    #         pl.col("feature_num").alias(stems_column),
     #         # pl.len().alias(column + "_count"),
     #     )
     # )
@@ -594,90 +676,104 @@ def simple_tokenize_column(col):
     )
 
 
-def save_tables(tables: List[TableInfo]):
-    # partitions = []
-    # for table in tables:
-    #     partitions.extend(make_partitions(table))
-
-    # print(f"Begin collect all partitions...")
-    # collected = pl.collect_all([partition for path, partition in partitions])
-    # for (path, partition), collected in zip(partitions, collected):
-    #     # for path, partition in partitions:
-    #     #     partition.sink_ipc(path)
-    #     #     pass
-    #     collected.write_parquet(
-    #         path,
-    #         compression="lz4",
-    #         compression_level=9,
-    #         pyarrow_options={},
-    #     )
-    for table in tables:
-        print(f"save_tables {table.path}...")
-        table.df = table.df.collect()  # type: ignore
-        # table.estimated_size = table.df.estimated_size()
-        # table.df = table.df.lazy()
-        partitions = make_partitions(table)
-        table.df = None
-        collected = pl.collect_all([partition for path, partition in partitions])  # type: ignore
-
-        for (path, partition), collected in zip(partitions, collected):
-            print(f"save_tables partition {path}...")
-            collected.write_parquet(
-                path,
-                compression="lz4",
-                compression_level=9,
-                pyarrow_options={},
-            )
-        del partitions
-        del collected
+# def save_tables(tables: List[TableInfo]):
+#     for table in tables:
+#         save_table(table, table.df)  # type: ignore
 
 
-def make_partitions(table: TableInfo):
+# def save_table(table):
+#     print(f"save_tables {table.path}...")
+#     table.df = table.df.collect()  # type: ignore
+#     # table.estimated_size = table.df.estimated_size()
+#     # table.df = table.df.lazy()
+#     partitions = make_partitions(table)
+#     table.df = None
+#     collected = pl.collect_all([partition for path, partition in partitions])  # type: ignore
 
-    if table.sort_by is None:
-        return [(table.path + f"_0.parquet", table.df.lazy())]  # type: ignore
-    df = table.df  # type: ignore
-    num_partitions = int(max(1, np.ceil(df.estimated_size() / (256 * 1024**2))))  # type: ignore
-    table.df = table.df.lazy()  # type: ignore
-
-    pcol = pl.col(table.sort_by)
-    pmax = pcol.max()
-    pmin = pcol.min()
-
-    partition_key_range_size = (pmax - pmin + 1) // num_partitions  # type: ignore
-    partition_number = (pcol - pmin) // partition_key_range_size
-    partition_number = partition_number.alias("partition")
-
-    df: pl.LazyFrame = table.df.with_columns(partition_number)  # type: ignore
-
-    return [
-        (
-            table.path + f"_{i}.parquet",
-            df.filter(pl.col("partition") == i).drop("partition"),
-        )
-        for i in range(num_partitions)
-    ]
+#     for (path, partition), collected in zip(partitions, collected):
+#         print(f"save_tables partition {path}...")
+#         collected.write_parquet(
+#             path,
+#             compression="lz4",
+#             compression_level=9,
+#             pyarrow_options={},
+#         )
+#     del partitions
+#     del collected
 
 
-def load_range_partitions(table: TableInfo):
-    return (
-        pl.scan_parquet(
-            table.path + f"_*.parquet",
-            low_memory=True,
-            rechunk=False,
-        )
-        .lazy()
-        .sort(table.sort_by)
+def save_table(
+    table: TableInfo,
+    df: pl.LazyFrame | pl.DataFrame,
+    streaming=False,
+):
+    print(f"save_tables {table.path}...")
+    # df: pl.LazyFrame = table.df.lazy()  # type: ignore
+    df = df.lazy()
+    print(df.explain(streaming=streaming))
+    df.collect(streaming=streaming).write_parquet(
+        table.path,
+        compression="lz4",
+        compression_level=9,
+        pyarrow_options={},
     )
+    return load_table(table)
 
 
-def replace_id_with_number(target_df, id_col, number_col, mapping_df):
-    return target_df.join(
-        mapping_df.select(
-            [
-                id_col,
-                number_col,
-            ]
-        ),
-        id_col,
-    ).drop(id_col)
+def load_table(table: TableInfo):
+    df = pl.scan_parquet(table.path, low_memory=True, rechunk=False).lazy()
+    if table.sort_by is not None:
+        df = df.sort(table.sort_by)
+    table.df = df
+    return df
+
+
+# def make_partitions(table: TableInfo):
+
+#     if not table.partition:  # type: ignore
+#         return [(table.path + f"_0.parquet", table.df.lazy())]  # type: ignore
+#     df = table.df  # type: ignore
+#     num_partitions = int(max(1, np.ceil(df.estimated_size() / (256 * 1024**2))))  # type: ignore
+#     table.df = table.df.lazy()  # type: ignore
+
+#     pcol = pl.col(table.sort_by)  # type: ignore
+#     pmax = pcol.max()
+#     pmin = pcol.min()
+
+#     partition_key_range_size = (pmax - pmin + 1) // num_partitions  # type: ignore
+#     partition_num = (pcol - pmin) // partition_key_range_size
+#     partition_num = partition_num.alias("partition")
+
+#     df: pl.LazyFrame = table.df.with_columns(partition_num)  # type: ignore
+
+#     return [
+#         (
+#             table.path + f"_{i}.parquet",
+#             df.filter(pl.col("partition") == i).drop("partition"),
+#         )
+#         for i in range(num_partitions)
+#     ]
+
+
+# def load_range_partitions(table: TableInfo):
+#     df = pl.scan_parquet(
+#         table.path + f"_*.parquet",
+#         low_memory=True,
+#         rechunk=False,
+#     ).lazy()
+#     if table.sort_by is not None:
+#         df = df.sort(table.sort_by)
+#     table.df = df
+#     return table.df
+
+
+# def replace_id_with_num(target_df, id_col, number_col, mapping_df):
+#     return target_df.join(
+#         mapping_df.select(
+#             [
+#                 id_col,
+#                 number_col,
+#             ]
+#         ),
+#         id_col,
+#     ).drop(id_col)
