@@ -155,7 +155,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         .with_row_index("query_num").set_sorted("query_num")
         # .drop("cleaned_url")
     )
-    print(queries.explain(streaming=True))
+    # print(queries.explain(streaming=True))
     # queries = queries.sink_csv(table_map["queries"].path + "_0.parquet")
     # queries = queries.collect(streaming=True).lazy()
     queries = save_table(table_map["queries"], queries, streaming=True)
@@ -263,13 +263,20 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
 
     print(f"Begin product stem mapping...")
 
+    products = products.drop(
+        "product_design_image_url_en_us",
+        "product_image_url_en_us",
+        "subject_score",
+        "subject",
+    )
+
     products = products.with_columns(
         pl.col("product_type").cast(pl.Categorical),
-        pl.col("subject_score").cast(pl.Float32),
-        pl.col("product_design_image_url_en_us").str.slice(
-            len("https://rlv.zcache.com/")
-        ),
-        pl.col("product_image_url_en_us").str.slice(len("https://rlv.zcache.com/")),
+        # pl.col("subject_score").cast(pl.Float32),
+        # pl.col("product_design_image_url_en_us").str.slice(
+        #     len("https://rlv.zcache.com/")
+        # ),
+        # pl.col("product_image_url_en_us").str.slice(len("https://rlv.zcache.com/")),
         pl.col("product_url_en_us").str.slice(len("https://www.zazzle.com/")),
         # simple_tokenize_column(pl.col("title")).alias("title_stems"),
         # simple_tokenize_column(pl.col("long_description")).alias(
@@ -303,10 +310,10 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         # .lazy()
     ).drop("long_description")
 
-    products = products.sort("product_id")
+    # products = products.sort("product_id")
     products = products.with_row_index(name="product_num").set_sorted("product_num")
 
-    products = save_table(table_map["products"], products)
+    products = save_table(table_map["products"], products, streaming=True)
 
     token_map = save_table(table_map["token_map"], token_map)
     # print(f"Begin product collection 1...")
@@ -336,7 +343,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     # users = users.collect(streaming=True).lazy()
     # print(f"done.")
     # print(f"Begin users collection 2...")
-    users = users.with_row_index(name="user_num").set_sorted("user_num")
+    users = users.with_row_index(name="user_num")
     users = save_table(table_map["users"], users, streaming=True)
     # print(f"done.")
     # products, users = (df.lazy() for df in pl.collect_all([products, users]))
