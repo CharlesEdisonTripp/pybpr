@@ -51,16 +51,14 @@ async def load_source_data(data_path, regenerate=False):
     tables = [
         TableInfo("products", "product_num", True, output_path),
         TableInfo("queries", "query_num", True, output_path),
-        TableInfo("interactions", "date_created", True, output_path),
+        TableInfo("interactions", "interaction_num", True, output_path),
         TableInfo("token_map", "token", False, output_path),
         TableInfo("feature_map", "feature_num", True, output_path),
         TableInfo("orderitems", "date_created", True, output_path),
         TableInfo("users", "user_num", True, output_path),
     ]
 
-    if regenerate or any(
-        (not os.path.isfile(table.path + "_0.parquet") for table in tables)
-    ):
+    if regenerate or any((not os.path.isfile(table.path) for table in tables)):
         await etl_source_data(data_path, tables)
         # products, queries, token_map, feature_map, orderitems, users = dfs
         # for (name, sort_by, path), df in zip(tables, dfs):
@@ -409,7 +407,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     clicks = clicks.with_columns(
         (
             pl.col("date_created").diff(-1, null_behavior="ignore").fill_null(0)
-            > (5 * 60 * 1e3)
+            > (5 * 60 * 1e6)
         )
         .cum_sum()
         .over(["user_num", "query_num"])
@@ -438,23 +436,31 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         "product_num",
     )
 
-    interactions = clicks.group_by(
-        "user_num",
-        "query_num",
-        "interaction_num",
-        maintain_order=True,
-    ).agg(
-        # pl.col("query_num").first(),
-        # pl.col("user_num").first(),
-        pl.col("date_created").first(),
-        pl.col("product_num")
-        .filter(pl.col("is_click") == 0)
-        .drop_nulls()
-        .alias("pass_nums"),
-        pl.col("product_num")
-        .filter(pl.col("is_click") != 0)
-        .drop_nulls()
-        .alias("click_nums"),
+    interactions = (
+        clicks.group_by(
+            "user_num",
+            "query_num",
+            "interaction_num",
+            maintain_order=True,
+        )
+        .agg(
+            # pl.col("query_num").first(),
+            # pl.col("user_num").first(),
+            pl.col("date_created").first(),
+            pl.col("product_num")
+            .filter(~pl.col("is_click"))
+            .drop_nulls()
+            .unique()
+            .alias("pass_nums"),
+            pl.col("product_num")
+            .filter(pl.col("is_click"))
+            .unique()
+            .drop_nulls()
+            .alias("click_nums"),
+        )
+        .with_columns(
+            pl.col("pass_nums").list.set_difference(pl.col("click_nums")),
+        )
     )
     interactions = interactions.drop("interaction_num")
     # interactions = interactions.with_columns(
@@ -463,6 +469,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     # )
 
     interactions = interactions.sort("date_created")
+    interactions = interactions.with_row_index(name="interaction_num")
 
     # queries = queries.collect(streaming=True).lazy()
 
