@@ -371,29 +371,44 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     orderitems = orderitems.sort("date_created")
     orderitems = save_table(table_map["orderitems"], orderitems, streaming=True)
 
-    print("convert clicks")
-    clicks = save_table(table_map["clicks"], clicks, sink=True)
-    print("done.")
+    # print("convert clicks")
+    # clicks = save_table(table_map["clicks"], clicks, sink=True)
+    # print("done.")
 
+    # print(queries.collect().sample(10))
+
+    print(f"Sink reduced clicks...")
     clicks = (
-        clicks.join(queries.select("cleaned_url", "query_num"), "cleaned_url")
+        clicks.join(
+            queries.select("cleaned_url", "query_num")
+            .collect()
+            .lazy(),
+            "cleaned_url",
+        )
         .drop("cleaned_url")
-        .join(users.select("user_id", "user_num"), "user_id")
+        .join(
+            users.select("user_id", "user_num").collect().lazy(),
+            "user_id",
+        )
         .drop("user_id")
-        .join(products.select("product_id", "product_num"), "product_id")
+        .join(
+            products.select("product_id", "product_num")
+            .collect()
+            .lazy(),
+            "product_id",
+        )
         .drop("product_id")
     )
 
-    print(f"Sink reduced clicks...")
     clicks = save_table(table_map["clicks"], clicks, sink=True)
     print(f"done.")
 
-    clicks = clicks.sort(
-        "user_num",
-        "query_num",
-        "date_created",
-        # "product_num",
-    )
+    # clicks = clicks.sort(
+    #     "user_num",
+    #     "query_num",
+    #     "date_created",
+    #     # "product_num",
+    # )
 
     clicks = clicks.with_columns(
         (
@@ -552,12 +567,15 @@ def save_table(
     print(f"save_tables {table.path}...")
     # df: pl.LazyFrame = table.df.lazy()  # type: ignore
     df = df.lazy()
-    print(df.explain(streaming=streaming))
+    if table.row_index in df.columns:
+        df = df.drop(table.row_index)
+
+    print(df.explain(streaming=streaming or sink))
     if sink:
         df.sink_ipc(
             table.path,
             compression="lz4",
-            maintain_order=True,
+            maintain_order=table.set_sorted is not None or table.row_index is not None,
         )
     else:
         # df.collect(streaming=streaming).write_parquet(
@@ -568,6 +586,7 @@ def save_table(
         # )
         df.collect(streaming=streaming).write_ipc(
             table.path,
+            # compression="uncompressed",
             compression="lz4",
             # compression_level=9,
             # pyarrow_options={},
