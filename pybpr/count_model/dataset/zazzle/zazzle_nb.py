@@ -1,3 +1,4 @@
+from itertools import chain
 import functools
 import os
 import re
@@ -33,15 +34,15 @@ from nltk.tokenize import word_tokenize
 @dataclass
 class TableInfo:
     name: str
-    sort_by: Optional[str]
-    partition: bool
     output_path: str
+    row_index: Optional[str]
+    set_sorted: Any
     df: Optional[Union[pl.LazyFrame, pl.DataFrame]] = None
     estimated_size: Optional[int] = None
 
     @property
     def path(self) -> str:
-        return os.path.join(self.output_path, self.name + "_0.parquet")
+        return os.path.join(self.output_path, self.name + "_0.ipc")
 
 
 async def load_source_data(data_path, regenerate=False):
@@ -49,14 +50,54 @@ async def load_source_data(data_path, regenerate=False):
     os.makedirs(output_path, exist_ok=True)
 
     tables = [
-        TableInfo("products", "product_num", True, output_path),
-        TableInfo("queries", "query_num", True, output_path),
-        TableInfo("interactions", "interaction_num", True, output_path),
-        TableInfo("token_map", "token", False, output_path),
-        TableInfo("feature_map", "feature_num", True, output_path),
-        TableInfo("orderitems", "date_created", True, output_path),
-        TableInfo("users", "user_num", True, output_path),
-        TableInfo("clicks", None, False, output_path),
+        TableInfo(
+            "products",
+            output_path,
+            "product_num",
+            None,
+        ),
+        TableInfo(
+            "queries",
+            output_path,
+            "query_num",
+            "query",
+        ),
+        TableInfo(
+            "interactions",
+            output_path,
+            "interaction_num",
+            None,
+        ),
+        TableInfo(
+            "token_map",
+            output_path,
+            None,
+            "token",
+        ),
+        TableInfo(
+            "feature_map",
+            output_path,
+            "feature_num",
+            None,
+        ),
+        TableInfo(
+            "orderitems",
+            output_path,
+            None,
+            "date_created",
+        ),
+        TableInfo(
+            "users",
+            output_path,
+            "user_num",
+            None,
+        ),
+        TableInfo(
+            "clicks",
+            output_path,
+            None,
+            None,
+        ),
     ]
 
     if regenerate or any((not os.path.isfile(table.path) for table in tables)):
@@ -120,18 +161,66 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     query_url_groups = pl.col("cleaned_url").str.extract_groups(
         r"https:\/\/([^\/]+)\/(([^\/]+)\/)?(.*)"
     )
+
+    def make_url_utf8_mappings():
+
+        def get_url_utf8_mapping(value: int, num_bytes: int):
+            bytes_value = value.to_bytes(num_bytes, byteorder="big")
+            utf8_value = bytes_value.decode("utf8")
+            string_value = "%" + "%".join(
+                (bytes_value[i : i + 1].hex() for i in range(len(bytes_value)))
+            )
+            return string_value, utf8_value
+
+        for v in range(0, 128):
+            yield get_url_utf8_mapping(v, 1)
+
+        def fill_following_bytes(base, depth, num_bytes):
+            if depth >= num_bytes:
+                try:
+                    yield get_url_utf8_mapping(base, num_bytes)
+                except:
+                    pass
+            else:
+                depth += 1
+                base *= 256
+                for value in range(base + 128, base + 192):
+                    yield from fill_following_bytes(value, depth, num_bytes)
+
+        for value in range(192, 224):
+            yield from fill_following_bytes(value, 1, 2)
+
+        for value in range(224, 240):
+            yield from fill_following_bytes(value, 1, 3)
+
+        for value in range(224, 248):
+            yield from fill_following_bytes(value, 1, 4)
+
+    hex_map = list(chain(make_url_utf8_mappings(), [("+", " ")]))
+
     queries = (
         queries.with_columns(
             query_url_groups.struct["3"].cast(pl.Categorical).alias("category"),
-            query_url_groups.struct["4"].str.replace_all(r"\+", " ").alias("query"),
+            # query_url_groups.struct["4"].str.replace_all(r"\+", " ").alias("query"),
+            query_url_groups.struct["4"]
+            .str.replace_many(
+                [k for k, v in hex_map],
+                [v for k, v in hex_map],
+                ascii_case_insensitive=True,
+            )
+            .alias("query"),
         )
         # .sort("query_count", descending=True)
         # .sort("cleaned_url")
-        .with_row_index("query_num").set_sorted("query_num")
+        # .with_row_index("query_num").set_sorted("query_num")
         # .drop("cleaned_url")
     )
+    del hex_map
+
     queries = save_table(table_map["queries"], queries, streaming=True)
     print(f"done.")
+
+    print(queries.collect().head(10))
 
     print(f"Begin token_map collection 1...")
 
@@ -255,7 +344,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     ).drop("long_description")
 
     products = products.sort("product_id")
-    products = products.with_row_index(name="product_num").set_sorted("product_num")
+    # products = products.with_row_index(name="product_num").set_sorted("product_num")
 
     products = save_table(table_map["products"], products, streaming=True)
 
@@ -269,7 +358,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
         .unique()
     )
 
-    users = users.with_row_index(name="user_num")
+    # users = users.with_row_index(name="user_num")
     users = save_table(table_map["users"], users, streaming=True)
 
     orderitems = (
@@ -282,6 +371,10 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     orderitems = orderitems.sort("date_created")
     orderitems = save_table(table_map["orderitems"], orderitems, streaming=True)
 
+    print("convert clicks")
+    clicks = save_table(table_map["clicks"], clicks, sink=True)
+    print("done.")
+
     clicks = (
         clicks.join(queries.select("cleaned_url", "query_num"), "cleaned_url")
         .drop("cleaned_url")
@@ -292,24 +385,14 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     )
 
     print(f"Sink reduced clicks...")
-    print(clicks.explain(streaming=True))
-    clicks.sink_parquet(
-        table_map["clicks"].path,
-        compression="lz4",
-        compression_level=9,
-    )
+    clicks = save_table(table_map["clicks"], clicks, sink=True)
     print(f"done.")
-    clicks = pl.scan_parquet(
-        table_map["clicks"].path,
-        low_memory=True,
-        rechunk=False,
-    )
 
     clicks = clicks.sort(
         "user_num",
         "query_num",
         "date_created",
-        "product_num",
+        # "product_num",
     )
 
     clicks = clicks.with_columns(
@@ -356,10 +439,10 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
             pl.col("click_nums").list.sort(),
         )
     )
-    interactions = interactions.drop("interaction_num")
 
-    interactions = interactions.sort("date_created")
-    interactions = interactions.with_row_index(name="interaction_num")
+    interactions = interactions.drop("interaction_num")
+    interactions = interactions.sort("user_num", "date_created")
+    # interactions = interactions.with_row_index(name="interaction_num")
 
     interactions = save_table(table_map["interactions"], interactions, streaming=False)
 
@@ -464,23 +547,46 @@ def save_table(
     table: TableInfo,
     df: pl.LazyFrame | pl.DataFrame,
     streaming=False,
+    sink=False,
 ):
     print(f"save_tables {table.path}...")
     # df: pl.LazyFrame = table.df.lazy()  # type: ignore
     df = df.lazy()
     print(df.explain(streaming=streaming))
-    df.collect(streaming=streaming).write_parquet(
-        table.path,
-        compression="lz4",
-        compression_level=9,
-        pyarrow_options={},
-    )
+    if sink:
+        df.sink_ipc(
+            table.path,
+            compression="lz4",
+            maintain_order=True,
+        )
+    else:
+        # df.collect(streaming=streaming).write_parquet(
+        #     table.path,
+        #     compression="lz4",
+        #     compression_level=9,
+        #     pyarrow_options={},
+        # )
+        df.collect(streaming=streaming).write_ipc(
+            table.path,
+            compression="lz4",
+            # compression_level=9,
+            # pyarrow_options={},
+        )
     return load_table(table, sort=False)
 
 
 def load_table(table: TableInfo, sort=False):
-    df = pl.scan_parquet(table.path, low_memory=True, rechunk=False).lazy()
-    if sort and table.sort_by is not None:
-        df = df.sort(table.sort_by)
+    # df = pl.scan_parquet(table.path, low_memory=True, rechunk=False).lazy()
+    df = pl.scan_ipc(
+        table.path,
+        rechunk=False,
+        # cache=False,
+        # memory_map=True,
+        row_index_name=table.row_index,
+    )
+    if table.set_sorted is not None:
+        df = df.set_sorted(table.set_sorted)
+    # if sort and table.sort_by is not None:
+    #     df = df.sort(table.sort_by)
     table.df = df
     return df

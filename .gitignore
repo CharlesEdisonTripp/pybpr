@@ -58,3 +58,4 @@ ENV/
 data/
 tags*
 cache
+pybpr/count_model/dataset/zazzle/pybpr.code-workspace
