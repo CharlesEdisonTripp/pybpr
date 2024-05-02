@@ -43,7 +43,7 @@ class DatabaseInfo:
 
     host: str = "localhost"
     database: str = "zazzle"
-    port: str = "1900"
+    port: str = "19000"
 
     def make_client(self) -> Client:
         return Client(**dataclasses.asdict(self))
@@ -158,7 +158,7 @@ def load_clicks(
     load_file(
         os.path.join(data_path, "Clicks_*.parquet"),
         db,
-        "click",
+        "click_input",
         [
             ("date_created", "UInt64"),
             ("user_id", "String"),
@@ -226,42 +226,295 @@ def load_files_into_database(
     load_clicks(data_path, db)
 
 
+def get_distinct_queries():
+    return """
+    SELECT
+        cleaned_url,
+        query_count,
+        components[3] AS category,
+        decodeURLFormComponent(components[4]) AS query_string
+    FROM (
+        SELECT
+            cleaned_url,
+            COUNT(1) AS query_count,
+            (extractAllGroups(cleaned_url, 'https:\/\/([^\/]+)\/(([^\/]+)\/)?(.*)'))[1] components
+        FROM click_input
+        GROUP BY cleaned_url
+        )
+    """
+
+
 def create_query_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
 
     query_columns = [
-        ("query_id", "UInt64"),
+        ("query_id", "UInt32"),
         ("cleaned_url", "String"),
         ("query_count", "UInt64"),
         ("category", "LowCardinality(String)"),
-        ("tokens", "Array(String)"),
+        ("query_string", "String"),
+        # ("tokens", "Array(String)"),
         # ("query_stems", "Array(UInt32)"),
     ]
 
     create_table(client, "query", query_columns, ["query_id"])
     # INSERT INTO query
     client.execute(
-        """
+        f"""
         INSERT INTO query
             SELECT 
                 rowNumberInAllBlocks() AS query_id, 
-                cleaned_url,
-                query_count,
-                components[3] AS category,
-                splitByWhitespace(decodeURLFormComponent(components[4])) AS query_tokens
+                *
             FROM (
-                SELECT 
-                    cleaned_url, 
-                    COUNT(1) AS query_count,
-                    (extractAllGroups(cleaned_url, 'https:\/\/([^\/]+)\/(([^\/]+)\/)?(.*)'))[1] components
-                FROM click
-                GROUP BY cleaned_url
+                {get_distinct_queries()}
                 ORDER BY query_count DESC
-                ) AS src    
+                ) AS src
     """
     )
+
+
+def create_user_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("user_num", "UInt64"),
+        ("user_id", "String"),
+        ("num_interactions", "UInt64"),
+    ]
+
+    create_table(
+        client,
+        "user",
+        columns,
+        [
+            "user_num",
+        ],
+    )
+    # INSERT INTO query
+    client.execute(
+        f"""
+        INSERT INTO user
+        SELECT
+            rowNumberInAllBlocks() AS user_num, 
+            user_id,
+            COUNT(1) num_interactions
+        FROM
+            click_input
+        GROUP BY user_id
+    """
+    )
+
+
+def create_click_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("user_num", "UInt64"),
+        ("date_created", "UInt32"),
+        ("is_click", "Boolean"),
+        ("query_id", "UInt32"),
+        ("product_id", "UInt64"),
+    ]
+
+    create_table(client, "click", columns, ["is_click", "user_num", "date_created"])
+
+    client.execute(
+        f"""
+        INSERT INTO click
+        SELECT 
+            user_num,
+            date_created,
+            is_click,
+            query_id,
+            product_id
+        FROM
+            click_input
+            INNER JOIN
+            query
+            USING (cleaned_url)
+            INNER JOIN
+            user
+            USING (user_id)
+    """
+    )
+
+
+def make_stem_command(input: str) -> str:
+    tokenize_regexp = r"([^\p{L}\d]+)"
+    return f"arrayFilter(x -> isNotNull(x) and notEmpty(x), arrayMap(x -> stem('en', x), splitByRegexp('{tokenize_regexp}', lowerUTF8({input}))))"
+
+
+def get_stems(source_table: str, source_column: str):
+    return f"""
+    (
+        SELECT
+            arrayJoin({make_stem_command(source_column)}) as stem,
+            COUNT(1) {source_column}_count
+        FROM
+            {source_table}
+        GROUP BY stem
+    )
+    """
+
+
+def make_stem_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+    client.execute("SET allow_experimental_nlp_functions = 1;")
+
+    stem_columns = [
+        ("stem_id", "UInt32"),
+        ("stem", "String"),
+        ("query_count", "UInt64"),
+        ("title_count", "UInt64"),
+        ("long_description_count", "UInt64"),
+        ("total_count", "UInt64"),
+    ]
+
+    create_table(client, "stem", stem_columns, ["stem_id"])
+
+    q = f"""
+        INSERT INTO stem
+        SELECT 
+            rowNumberInAllBlocks() stem_id,
+            stem,
+            coalesce(query_count, 0) query_count,
+            coalesce(title_count, 0) title_count,
+            coalesce(long_description_count, 0) long_description_count,
+            (query_count + title_count + long_description_count) total_count
+        FROM
+            {get_stems('product', 'title')} AS titles
+            FULL OUTER JOIN 
+            {get_stems('product', 'long_description')} AS descriptions
+            USING (stem)
+            FULL OUTER JOIN
+            (
+            SELECT
+                    arrayJoin({make_stem_command('query_string')}) as stem,
+                    SUM(query_count) query_count
+                FROM
+                    ({get_distinct_queries()}) as queries
+                GROUP BY stem
+            ) AS queries
+            USING (stem)
+        ORDER BY total_count DESC
+    """
+    print(q)
+    client.execute(q)
+
+
+def get_stem_ids_from_column(table: str, id_column: str, target_column: str) -> str:
+    return f"""
+    SELECT
+        {id_column},
+        stem_id
+    FROM
+    (
+        SELECT 
+            {id_column},
+            arrayJoin({make_stem_command(target_column)}) stem
+        FROM
+            {table}
+    ) x
+    INNER JOIN stem USING (stem)
+    """
+
+
+# def make_stem_table(
+#     db: DatabaseInfo,
+#     source_table: str,
+#     dest_table: str,
+#     id_column: Tuple[str, str],
+#     target_column: str,
+# ):
+#     client = db.make_client()
+#     client.execute("SET allow_experimental_nlp_functions = 1;")
+
+#     columns = [
+#         id_column,
+#         ("stem_id", "UInt32"),
+#     ]
+
+#     create_table(
+#         client,
+#         dest_table,
+#         columns,
+#         [id_column[0], "stem_id"],
+#     )
+
+#     q = f"""
+#     INSERT INTO {dest_table}
+#         {get_stem_ids_from_column(source_table, id_column[0], target_column)}
+#     """
+#     print(q)
+#     client.execute(q)
+
+
+def make_product_title_stem_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+    client.execute("SET allow_experimental_nlp_functions = 1;")
+
+    columns = [
+        ("product_id", "Int64"),
+        ("stem_id", "UInt32"),
+    ]
+
+    create_table(client, "product_title_stem", columns, ["product_id", "stem_id"])
+
+    client.execute(
+        f"""
+            INSERT INTO product_title_stem
+            SELECT
+                product_id,
+                stem_id
+            FROM
+                (
+                SELECT 
+                    product_id,
+                    arrayJoin({make_stem_command('title')}) as stem
+                FROM
+                    product
+                ) product_data
+                INNER JOIN 
+                stem
+                USING (stem)
+                """
+    )
+
+
+def make_query_stem_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+    client.execute("SET allow_experimental_nlp_functions = 1;")
+
+    columns = [
+        ("query_id", "UInt32"),
+        ("stem_id", "UInt32"),
+    ]
+
+    create_table(
+        client,
+        "query_stem",
+        columns,
+        ["query_id", "stem_id"],
+    )
+
+    q = f"""
+    INSERT INTO product_title_stem
+        {get_stem_ids_from_column('product', 'product_id', 'title')}
+    """
+    print(q)
+    client.execute(q)
 
 
 @dataclass
@@ -872,7 +1125,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     #         .list.concat(
     #             pl.col("passes").list.eval(pl.element().is_null())
     #         )  # hack to get around list evaluation literal bug in polars
-    #         .alias("click"),
+    #         .alias("click_input"),
     #     )
     #     .drop("clicks", "passes")
     #     .sort("user_num", "date_created")
@@ -938,7 +1191,7 @@ async def etl_source_data(data_path: str, tables: List[TableInfo]):
     #         .list.concat(
     #             pl.col("passes").list.eval(pl.element().is_null())
     #         )  # hack to get around list evaluation literal bug in polars
-    #         .alias("click"),
+    #         .alias("click_input"),
     #     )
     #     .drop("clicks", "passes")
     #     .sort("user_num", "date_created")
