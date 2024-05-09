@@ -85,6 +85,7 @@ def create_table(
     table_name: str,
     columns: List[Tuple[str, str]],
     primary_keys: Iterable[str],
+    sample_by: Optional[Iterable[str]] = None,
 ):
     client.execute(f"DROP TABLE IF EXISTS {table_name}")
 
@@ -92,26 +93,20 @@ def create_table(
         [f"{name} {ch_type}" for name, ch_type in columns]
     )
     primary_key_clause = ", ".join(primary_keys)
-    print(
-        f"""
+    query = f"""
         CREATE TABLE {table_name} 
         (
            {create_table_columns_clause}
         )
         ENGINE = MergeTree()
-        PRIMARY KEY ({primary_key_clause})
+        ORDER BY ({primary_key_clause})
         """
-    )
-    client.execute(
-        f"""
-        CREATE TABLE {table_name} 
-        (
-           {create_table_columns_clause}
-        )
-        ENGINE = MergeTree()
-        PRIMARY KEY ({primary_key_clause})
-        """
-    )
+    if sample_by is not None:
+        key_clause = ", ".join(sample_by)
+        query = f"""{query}
+        SAMPLE BY ({key_clause})"""
+
+    client.execute(query)
 
 
 def load_file(
@@ -181,7 +176,7 @@ def load_orderitems(
         [
             ("date_created", "UInt64"),
             ("user_id", "String"),
-            ("product_id", "Int64"),
+            ("product_id", "UInt64"),
         ],
         ["user_id", "date_created"],
     )
@@ -196,7 +191,7 @@ def load_products(
         db,
         "product",
         [
-            ("product_id", "Int64"),
+            ("product_id", "UInt64"),
             ("title", "String"),
             ("product_type", "LowCardinality(String)"),
             ("product_url_en_us", "String"),
@@ -259,7 +254,13 @@ def create_query_table(
         # ("query_stems", "Array(UInt32)"),
     ]
 
-    create_table(client, "query", query_columns, ["query_id"])
+    create_table(
+        client,
+        "query",
+        query_columns,
+        ["query_id"],
+        sample_by=["query_id"],
+    )
     # INSERT INTO query
     client.execute(
         f"""
@@ -293,6 +294,7 @@ def create_user_table(
         [
             "user_num",
         ],
+        sample_by=["user_num"],
     )
     # INSERT INTO query
     client.execute(
@@ -320,9 +322,15 @@ def create_click_table(
         ("is_click", "Boolean"),
         ("query_id", "UInt32"),
         ("product_id", "UInt64"),
+        # ("interaction_id", "UInt64"),
     ]
 
-    create_table(client, "click", columns, ["is_click", "user_num", "date_created"])
+    create_table(
+        client,
+        "click",
+        columns,
+        ["user_num", "query_id", "date_created"],
+    )
 
     client.execute(
         f"""
@@ -343,6 +351,163 @@ def create_click_table(
             USING (user_id)
     """
     )
+
+
+def create_feature_click_0_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("user_num", "UInt64"),
+        ("feature_id", "UInt32"),
+        ("is_click", "Boolean"),
+        ("date_created", "UInt32"),
+        ("num", "UInt32"),
+    ]
+
+    create_table(
+        client,
+        "feature_click_0",
+        columns,
+        ["user_num", "feature_id", "is_click", "date_created"],
+    )
+
+    client.execute(
+        f"""
+        INSERT INTO feature_click_0
+        SELECT 
+            user_num,
+            feature_id,
+            is_click,
+            date_created,
+            ((rank() OVER (PARTITION BY (user_num, feature_id, is_click) ORDER BY date_created)) - 1) num
+        FROM
+                click
+            INNER JOIN
+                product_title_stem
+                USING(product_id)
+    """
+    )
+
+
+def create_feature_click_1_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("user_num", "UInt64"),
+        ("feature_id", "UInt32"),
+        # ("is_click", "Boolean"),
+        ("date_created", "UInt32"),
+        ("clicks", "UInt32"),
+        ("passes", "UInt32"),
+    ]
+
+    create_table(
+        client,
+        "feature_click_1",
+        columns,
+        ["user_num", "feature_id", "date_created"],
+    )
+
+    client.execute(
+        f"""
+        INSERT INTO feature_click_1
+        SELECT 
+            user_num,
+            feature_id,
+            date_created,
+            (SUM(is_click) OVER w) clicks,
+            (SUM(NOT is_click) OVER w) passes
+        FROM
+                click
+            INNER JOIN
+                product_title_stem
+                USING(product_id)
+        WINDOW
+            w AS (PARTITION BY (user_num, feature_id) ORDER BY date_created)
+    """
+    )
+
+
+def create_feature_click_2_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("user_num", "UInt64"),
+        ("feature_id", "UInt32"),
+        # ("is_click", "Boolean"),
+        ("date_created", "UInt32"),
+        ("clicks", "UInt32"),
+        ("passes", "UInt32"),
+    ]
+
+    create_table(
+        client,
+        "feature_click_2",
+        columns,
+        ["user_num", "feature_id", "date_created"],
+    )
+
+    client.execute(
+        f"""
+        INSERT INTO feature_click_1
+        SELECT 
+            user_num,
+            feature_id,
+            date_created,
+            (SUM(is_click) OVER w) clicks,
+            (SUM(NOT is_click) OVER w) passes
+        FROM
+                click
+            INNER JOIN
+                product_title_stem
+                USING(product_id)
+        WINDOW
+            w AS (PARTITION BY (user_num, feature_id) ORDER BY date_created)
+    """
+    )
+
+
+# def create_feature_click_1_table(
+#     db: DatabaseInfo,
+# ):
+#     print("1!")
+
+#     client = db.make_client()
+
+#     columns = [
+#         ("user_num", "UInt64"),
+#         ("feature_id", "UInt32"),
+#         ("date_created", "UInt32"),
+#         ("clicks", "UInt32"),
+#         ("passes", "UInt32"),
+#     ]
+
+#     create_table(
+#         client,
+#         "feature_click_1",
+#         columns,
+#         ["user_num", "feature_id", "date_created"],
+#     )
+
+#     client.execute(
+#         f"""
+#         INSERT INTO feature_click_1
+#         SELECT
+#             user_num,
+#             feature_id,
+#             date_created,
+#             (MAX(is_click * num) OVER (PARTITION BY (user_num, feature_id) ORDER BY date_created)) clicks,
+#             (MAX((NOT is_click) * num) OVER (PARTITION BY (user_num, feature_id) ORDER BY date_created)) passes
+#         FROM
+#             feature_click_0
+#     """
+#     )
 
 
 def make_stem_command(input: str) -> str:
@@ -378,7 +543,7 @@ def make_stem_table(
         ("total_count", "UInt64"),
     ]
 
-    create_table(client, "stem", stem_columns, ["stem_id"])
+    create_table(client, "stem", stem_columns, ["stem_id"], ["stem_id"])
 
     q = f"""
         INSERT INTO stem
@@ -464,18 +629,18 @@ def make_product_title_stem_table(
     client.execute("SET allow_experimental_nlp_functions = 1;")
 
     columns = [
-        ("product_id", "Int64"),
-        ("stem_id", "UInt32"),
+        ("product_id", "UInt64"),
+        ("feature_id", "UInt32"),
     ]
 
-    create_table(client, "product_title_stem", columns, ["product_id", "stem_id"])
+    create_table(client, "product_title_stem", columns, ["product_id", "feature_id"])
 
     client.execute(
         f"""
             INSERT INTO product_title_stem
             SELECT
                 product_id,
-                stem_id
+                stem_id AS feature_id
             FROM
                 (
                 SELECT 
