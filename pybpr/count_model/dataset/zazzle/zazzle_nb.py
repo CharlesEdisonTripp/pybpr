@@ -239,7 +239,7 @@ def get_distinct_queries():
     """
 
 
-def create_query_table(
+def make_query_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
@@ -276,7 +276,7 @@ def create_query_table(
     )
 
 
-def create_user_table(
+def make_user_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
@@ -311,14 +311,14 @@ def create_user_table(
     )
 
 
-def create_click_table(
+def make_click_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
 
     columns = [
-        ("user_num", "UInt64"),
-        ("date_created", "UInt32"),
+        ("user_num", "UInt32"),
+        ("date_created", "UInt64"),
         ("is_click", "Boolean"),
         ("query_id", "UInt32"),
         ("product_id", "UInt64"),
@@ -329,7 +329,7 @@ def create_click_table(
         client,
         "click",
         columns,
-        ["user_num", "query_id", "date_created"],
+        ["user_num", "date_created"],
     )
 
     client.execute(
@@ -337,7 +337,7 @@ def create_click_table(
         INSERT INTO click
         SELECT 
             user_num,
-            date_created,
+            (CAST(date_created, 'UInt64') * 1000000 + (row_number() OVER (PARTITION BY user_num, date_created))) date_created,
             is_click,
             query_id,
             product_id
@@ -351,6 +351,42 @@ def create_click_table(
             USING (user_id)
     """
     )
+
+    # columns = [
+    #     ("user_num", "UInt64"),
+    #     ("date_created", "UInt32"),
+    #     ("is_click", "Boolean"),
+    #     ("query_id", "UInt32"),
+    #     ("product_id", "UInt64"),
+    #     # ("interaction_id", "UInt64"),
+    # ]
+
+    # create_table(
+    #     client,
+    #     "click",
+    #     columns,
+    #     ["user_num", "query_id", "date_created"],
+    # )
+
+    # client.execute(
+    #     f"""
+    #     INSERT INTO click
+    #     SELECT
+    #         user_num,
+    #         date_created,
+    #         is_click,
+    #         query_id,
+    #         product_id
+    #     FROM
+    #         click_input
+    #         INNER JOIN
+    #         query
+    #         USING (cleaned_url)
+    #         INNER JOIN
+    #         user
+    #         USING (user_id)
+    # """
+    # )
 
 
 def create_feature_click_0_table(
@@ -664,22 +700,74 @@ def make_query_stem_table(
 
     columns = [
         ("query_id", "UInt32"),
-        ("stem_id", "UInt32"),
+        ("feature_id", "UInt32"),
     ]
 
     create_table(
         client,
         "query_stem",
         columns,
-        ["query_id", "stem_id"],
+        ["query_id", "feature_id"],
     )
 
     q = f"""
-    INSERT INTO product_title_stem
-        {get_stem_ids_from_column('product', 'product_id', 'title')}
+    INSERT INTO query_stem
+        {get_stem_ids_from_column('query', 'query_id', 'query_string')}
     """
     print(q)
     client.execute(q)
+
+
+def make_user_feature_count_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+    columns = [
+        ("user_num", "UInt64"),
+        ("feature_id", "UInt32"),
+        ("date_created", "UInt64"),
+        ("cumulative_clicks", "UInt32"),
+        ("cumulative_passes", "UInt32"),
+        # ("cumulative_query_clicks", "UInt32"),
+        # ("cumulative_query_passes", "UInt32"),
+    ]
+
+    create_table(
+        client,
+        "user_feature_count",
+        columns,
+        ["user_num", "feature_id", "date_created"],
+    )
+
+    client.execute(
+        f"""
+            INSERT INTO user_feature_count
+            SELECT
+                src.user_num,
+                product_title_stem.feature_id,
+                src.date_created,
+                (SUM(is_click) OVER w) AS cumulative_clicks,
+                (SUM(NOT is_click) OVER w) - cumulative_clicks AS cumulative_passes
+            FROM
+                (
+                    SELECT 
+                        user_num,
+                        date_created,
+                        is_click,
+                        product_id,
+                        query_id
+                    FROM 
+                        click
+                    ORDER BY user_num, date_created
+                ) src
+                INNER JOIN product_title_stem USING (product_id)
+            WINDOW
+                w AS (PARTITION BY (user_num, product_title_stem.feature_id) ORDER BY date_created)
+            """
+    )
+    # LEFT JOIN query_stem USING(query_id, feature_id)
+    # (SUM(is_click AND (query_stem.query_id IS NOT NULL)) OVER w) AS cumulative_query_clicks,
+    # (SUM((NOT is_click) AND (query_stem.query_id IS NOT NULL)) OVER w) - cumulative_query_clicks AS cumulative_query_passes
 
 
 @dataclass
