@@ -464,8 +464,9 @@ def make_click_table(
     client = db.make_client()
 
     columns = [
+        ("click_num", "UInt64"),
         ("user_num", "UInt32"),
-        ("date_created", "UInt64"),
+        ("date_created", "UInt32"),
         ("clicked", "Boolean"),
         ("query_id", "UInt32"),
         ("product_id", "UInt64"),
@@ -475,18 +476,20 @@ def make_click_table(
         client,
         "click",
         columns,
-        ["user_num", "date_created"],
+        ["click_num"],
     )
 
+    # (CAST(date_created, 'UInt64') * 1000000 + (row_number() OVER (PARTITION BY user_num, date_created))) date_created,
     client.execute(
         f"""
         INSERT INTO click
         SELECT
+            rowNumberInAllBlocks() AS click_num,
             user_num,
-            (CAST(date_created, 'UInt64') * 1000000 + (row_number() OVER (PARTITION BY user_num, date_created))) date_created,
+            date_created,
             clicked,
             query_id,
-            product_id            
+            product_id     
         FROM
         (
             SELECT 
@@ -505,6 +508,7 @@ def make_click_table(
         ) src
         WHERE
             NOT is_click
+        ORDER BY date_created, user_num, query_id, product_id
     """
     )
 
@@ -516,7 +520,7 @@ def make_user_feature_count_table(
     columns = [
         ("user_num", "UInt64"),
         ("feature_id", "UInt32"),
-        ("date_created", "UInt64"),
+        ("date_created", "UInt32"),
         ("cumulative_clicks", "UInt32"),
         ("cumulative_passes", "UInt32"),
         # ("cumulative_query_clicks", "UInt32"),
@@ -552,7 +556,11 @@ def make_user_feature_count_table(
                 ) src
                 INNER JOIN product_title_stem USING (product_id)
             WINDOW
-                w AS (PARTITION BY (user_num, product_title_stem.feature_id) ORDER BY date_created)
+                w AS (
+                    PARTITION BY (user_num, product_title_stem.feature_id) 
+                    ORDER BY date_created
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    )
             """
     )
     # LEFT JOIN query_stem USING(query_id, feature_id)
@@ -566,7 +574,7 @@ def make_global_feature_count_table(
     client = db.make_client()
     columns = [
         ("feature_id", "UInt32"),
-        ("date_created", "UInt64"),
+        ("date_created", "UInt32"),
         ("cumulative_clicks", "UInt32"),
         ("cumulative_passes", "UInt32"),
     ]
@@ -598,7 +606,11 @@ def make_global_feature_count_table(
                 ) src
                 INNER JOIN product_title_stem USING (product_id)
             WINDOW
-                w AS (PARTITION BY (product_title_stem.feature_id) ORDER BY date_created)
+                w AS (
+                    PARTITION BY (product_title_stem.feature_id) 
+                    ORDER BY date_created
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    )
             """
     )
     # LEFT JOIN query_stem USING(query_id, feature_id)
@@ -612,7 +624,7 @@ def make_global_product_count_table(
     client = db.make_client()
     columns = [
         ("product_id", "UInt64"),
-        ("date_created", "UInt64"),
+        ("date_created", "UInt32"),
         ("cumulative_clicks", "UInt32"),
         ("cumulative_passes", "UInt32"),
     ]
@@ -635,7 +647,11 @@ def make_global_product_count_table(
             FROM
                 click
             WINDOW
-                w AS (PARTITION BY (product_id) ORDER BY date_created)
+                w AS (
+                    PARTITION BY (product_id) 
+                    ORDER BY date_created
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    )
             """
     )
 
@@ -647,7 +663,7 @@ def make_user_product_count_table(
     columns = [
         ("user_num", "UInt64"),
         ("product_id", "UInt64"),
-        ("date_created", "UInt64"),
+        ("date_created", "UInt32"),
         ("cumulative_clicks", "UInt32"),
         ("cumulative_passes", "UInt32"),
     ]
@@ -671,126 +687,114 @@ def make_user_product_count_table(
             FROM
                 click
             WINDOW
-                w AS (PARTITION BY (user_num, product_id) ORDER BY date_created)
+                w AS (
+                    PARTITION BY (user_num, product_id) 
+                    ORDER BY date_created
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    )
             """
     )
 
 
-def create_feature_click_0_table(
+def make_click_counts_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
-
     columns = [
-        ("user_num", "UInt64"),
-        ("feature_id", "UInt32"),
-        ("is_click", "Boolean"),
+        ("click_num", "UInt64"),
+        ("user_num", "UInt32"),
         ("date_created", "UInt32"),
-        ("num", "UInt32"),
+        ("clicked", "Boolean"),
+        ("query_id", "UInt32"),
+        ("product_id", "UInt64"),
+        ("product_clicks", "UInt32"),
+        ("product_passes", "UInt32"),
+        ("product_user_clicks", "UInt32"),
+        ("product_user_passes", "UInt32"),
+        ("feature_id", "Array(UInt32)"),
+        ("feature_clicks", "Array(UInt32)"),
+        ("feature_passes", "Array(UInt32)"),
     ]
 
     create_table(
         client,
-        "feature_click_0",
+        "click_counts",
         columns,
-        ["user_num", "feature_id", "is_click", "date_created"],
+        ["date_created"],
     )
 
     client.execute(
         f"""
-        INSERT INTO feature_click_0
-        SELECT 
-            user_num,
-            feature_id,
-            is_click,
-            date_created,
-            ((rank() OVER (PARTITION BY (user_num, feature_id, is_click) ORDER BY date_created)) - 1) num
-        FROM
-                click
-            INNER JOIN
-                product_title_stem
-                USING(product_id)
-    """
-    )
-
-
-def create_feature_click_1_table(
-    db: DatabaseInfo,
-):
-    client = db.make_client()
-
-    columns = [
-        ("user_num", "UInt64"),
-        ("feature_id", "UInt32"),
-        # ("is_click", "Boolean"),
-        ("date_created", "UInt32"),
-        ("clicks", "UInt32"),
-        ("passes", "UInt32"),
-    ]
-
-    create_table(
-        client,
-        "feature_click_1",
-        columns,
-        ["user_num", "feature_id", "date_created"],
-    )
-
-    client.execute(
-        f"""
-        INSERT INTO feature_click_1
-        SELECT 
-            user_num,
-            feature_id,
-            date_created,
-            (SUM(is_click) OVER w) clicks,
-            (SUM(NOT is_click) OVER w) passes
-        FROM
-                click
-            INNER JOIN
-                product_title_stem
-                USING(product_id)
-        WINDOW
-            w AS (PARTITION BY (user_num, feature_id) ORDER BY date_created)
-    """
-    )
-
-
-def create_feature_click_2_table(
-    db: DatabaseInfo,
-):
-    client = db.make_client()
-
-    columns = [
-        ("user_num", "UInt64"),
-        ("feature_id", "UInt32"),
-        # ("is_click", "Boolean"),
-        ("date_created", "UInt32"),
-        ("clicks", "UInt32"),
-        ("passes", "UInt32"),
-    ]
-
-    create_table(
-        client,
-        "feature_click_2",
-        columns,
-        ["user_num", "feature_id", "date_created"],
-    )
-
-    client.execute(
-        f"""
-        INSERT INTO feature_click_1
-        SELECT 
-            user_num,
-            feature_id,
-            date_created,
-            (SUM(is_click) OVER w) clicks,
-            (SUM(NOT is_click) OVER w) passes
-        FROM
-                click
-            INNER JOIN
-                product_title_stem
-                USING(product_id)
-        WINDOW
-            w AS (PARTITION BY (user_num, feature_id) ORDER BY date_created)
-    """
+            INSERT INTO click_counts
+            SELECT
+                product_counts.click_num,
+                product_counts.user_num,
+                product_counts.date_created,
+                product_counts.clicked,
+                product_counts.query_id,
+                product_counts.product_id,
+                product_counts.product_clicks,
+                product_counts.product_passes,
+                product_counts.product_user_clicks,
+                product_counts.product_user_passes,
+                feature_counts.feature_id,
+                feature_counts.feature_clicks,
+                feature_counts.feature_passes
+            FROM
+                (
+                    SELECT
+                        click_num,
+                        user_num,
+                        date_created,
+                        clicked,
+                        query_id,
+                        product_id,
+                        (SUM(clicked) OVER product_window) AS product_clicks,
+                        (SUM(NOT clicked) OVER product_window) AS product_passes,
+                        (SUM(clicked) OVER product_user_window) AS product_user_clicks,
+                        (SUM(NOT clicked) OVER product_user_window) AS product_user_passes
+                    FROM
+                        click
+                    WINDOW
+                        product_window AS (
+                            PARTITION BY (click.product_id) 
+                            ORDER BY click_num
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                            ),
+                        product_user_window AS (
+                            PARTITION BY (click.product_id, click.user_num) 
+                            ORDER BY click_num
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                            )
+                    ORDER BY click_num
+                ) product_counts
+                INNER JOIN
+                (
+                    SELECT
+                        click_num,
+                        groupArray(feature_id) feature_id,
+                        groupArray(feature_clicks) feature_clicks,
+                        groupArray(feature_passes) feature_passes
+                    FROM
+                        (
+                            SELECT
+                                click_num,
+                                product_title_stem.feature_id,
+                                (SUM(clicked) OVER feature_window) feature_clicks,
+                                (SUM(NOT clicked) OVER feature_window) feature_passes
+                            FROM
+                                click
+                                INNER JOIN product_title_stem USING (product_id)
+                            WINDOW
+                                feature_window AS (
+                                    PARTITION BY (product_title_stem.feature_id) 
+                                    ORDER BY click_num
+                                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                                    )
+                            ORDER BY click_num
+                        ) src
+                    GROUP BY click_num
+                ) feature_counts USING (click_num)
+                SETTINGS join_algorithm = 'full_sorting_merge'
+            """
     )
