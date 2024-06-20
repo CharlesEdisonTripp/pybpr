@@ -404,7 +404,7 @@ def make_assess_nb(
 ):
     def assess(interaction: Interaction) -> float:
         return factored_naive_bayes.compute_naive_bayes(
-            prior_assesor(interaction).probability,
+            prior_assesor(interaction),
             itertools.chain.from_iterable(
                 (
                     factor_generator(interaction)

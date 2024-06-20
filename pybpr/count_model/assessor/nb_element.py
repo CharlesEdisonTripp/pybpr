@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+import numpy as np
 
 
 @dataclass
 class NBElement:
-    numerator: float  # conditional odds numerator
-    denominator: float  # conditional odds denominator
+    numerator: float
+    denominator: float
 
     def __add__(self, other: "NBElement") -> "NBElement":
         return NBElement(
@@ -31,5 +32,13 @@ class NBElement:
     def probability(self) -> float:
         return self.numerator / self.denominator
 
+    @property
+    def odds(self) -> float:
+        return self.numerator / (self.denominator - self.numerator)
+
+    @property
+    def log_odds(self) -> float:
+        return np.log(self.numerator) - np.log(self.denominator - self.numerator)
+
     def rescaled(self, weight: float) -> "NBElement":
-        return NBElement(self.probability * weight, weight)
+        return NBElement((self.numerator * weight) / self.denominator, weight)

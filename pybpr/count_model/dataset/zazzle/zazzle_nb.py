@@ -866,3 +866,151 @@ def make_user_counts_table(
                     )
             """
     )
+
+
+def make_interaction_query(clicked, limit, offset):
+    return f"""
+        SELECT 
+            interaction_num, click_num, user_num, date_created, clicked, query_id, product_id 
+        FROM click
+        WHERE clicked = {clicked}
+        ORDER BY intHash64(interaction_num) 
+        LIMIT {limit} OFFSET {offset}
+    """
+
+
+def get_counts_for_interaction1(db: DatabaseInfo, interaction_query) -> pd.DataFrame:
+    # aggregating feature counts
+
+    # P(feature | click) = P(feature and click) / P(click) ~= # feature clicks / # clicks
+    # P(feature | pass) = P(feature and pass) / P(pass) ~= # feature passes / # passes
+    # O(feature | click) = P(feature | click) / P(feature| pass)
+    #       = (# feature clicks / # clicks) / (# feature passes / # passes)
+    #       = (# feature clicks / # feature passes) * (# passes / # clicks)
+
+    client = db.make_client()
+    user_feature_counts_query = f"""
+        SELECT
+            interaction_query.interaction_num interaction_num,
+            interaction_query.click_num click_num,
+            interaction_query.user_num user_num,
+            interaction_query.date_created date_created,
+            interaction_query.clicked clicked,
+            interaction_query.query_id query_id,
+            interaction_query.product_id product_id,
+
+            global_click_count.cumulative_clicks clicks,
+            global_click_count.cumulative_passes passes,
+            global_product_count.cumulative_clicks product_clicks,
+            global_product_count.cumulative_passes product_passes,
+            user_counts.cumulative_clicks user_clicks,
+            user_counts.cumulative_passes user_passes,
+            user_product_count.cumulative_clicks user_product_clicks,
+            user_product_count.cumulative_passes user_product_passes,
+
+            product_title_stem.feature_id feature_id,
+            (query_stem.feature_id = product_title_stem.feature_id) feature_in_query,
+            global_feature_count.cumulative_clicks feature_clicks,
+            global_feature_count.cumulative_passes feature_passes,
+            user_feature_count.cumulative_clicks user_feature_clicks,
+            user_feature_count.cumulative_passes user_feature_passes
+        FROM
+            ({interaction_query}) AS interaction_query
+            INNER JOIN global_click_count USING (date_created)
+            INNER JOIN global_product_count USING (product_id, date_created)
+            INNER JOIN user_counts USING (user_num, date_created)
+            INNER JOIN user_product_count USING (user_num, product_id, date_created)
+            INNER JOIN product_title_stem USING (product_id)
+            INNER JOIN global_feature_count USING (feature_id, date_created)
+            INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
+            LEFT OUTER JOIN query_stem USING (query_id, feature_id)
+        ORDER BY click_num
+        """
+    join_settings_clause = "\nSETTINGS join_algorithm = 'full_sorting_merge'"
+    values = client.query_dataframe(user_feature_counts_query + join_settings_clause)
+    return values
+
+
+def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFrame:
+    # aggregating feature counts
+
+    # P(feature | click) = P(feature and click) / P(click) ~= # feature clicks / # clicks
+    # P(feature | pass) = P(feature and pass) / P(pass) ~= # feature passes / # passes
+    # O(feature | click) = P(feature | click) / P(feature| pass)
+    #       = (# feature clicks / # clicks) / (# feature passes / # passes)
+    #       = (# feature clicks / # feature passes) * (# passes / # clicks)
+
+    client = db.make_client()
+    user_feature_counts_query = f"""
+        SELECT
+            interaction.interaction_num interaction_num,
+            interaction.click_num click_num,
+            interaction.user_num user_num,
+            interaction.date_created date_created,
+            interaction.clicked clicked,
+            interaction.query_id query_id,
+            interaction.product_id product_id,
+
+            global_click_count.cumulative_clicks clicks,
+            global_click_count.cumulative_passes passes,
+            global_product_count.cumulative_clicks product_clicks,
+            global_product_count.cumulative_passes product_passes,
+            user_counts.cumulative_clicks user_clicks,
+            user_counts.cumulative_passes user_passes,
+            user_product_count.cumulative_clicks user_product_clicks,
+            user_product_count.cumulative_passes user_product_passes,
+
+            interaction.feature_id feature_id,
+            interaction.feature_in_query feature_in_query,
+            interaction.feature_clicks feature_clicks,
+            interaction.feature_passes feature_passes,
+            interaction.user_feature_clicks user_feature_clicks,
+            interaction.user_feature_passes user_feature_passes
+        FROM
+            (
+                SELECT
+                    interaction.interaction_num,
+                    interaction.click_num click_num,
+                    any(interaction.user_num) user_num,
+                    any(interaction.date_created) date_created,
+                    any(interaction.clicked) clicked,
+                    any(interaction.query_id) query_id,
+                    any(interaction.product_id) product_id,
+                    groupArray(product_title_stem.feature_id) feature_id,
+                    groupArray(query_stem.feature_id = product_title_stem.feature_id) feature_in_query,
+                    groupArray(global_feature_count.cumulative_clicks) feature_clicks,
+                    groupArray(global_feature_count.cumulative_passes) feature_passes,
+                    groupArray(user_feature_count.cumulative_clicks) user_feature_clicks,
+                    groupArray(user_feature_count.cumulative_passes) user_feature_passes
+                FROM
+                    ({interaction_query}) AS interaction
+                    INNER JOIN product_title_stem USING (product_id)
+                    INNER JOIN global_feature_count USING (feature_id, date_created)
+                    INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
+                    LEFT OUTER JOIN query_stem USING (query_id, feature_id)
+                GROUP BY interaction.interaction_num, interaction.click_num
+            ) AS interaction            
+            INNER JOIN global_click_count USING (date_created)
+            INNER JOIN global_product_count USING (product_id, date_created)
+            INNER JOIN user_counts USING (user_num, date_created)
+            INNER JOIN user_product_count USING (user_num, product_id, date_created)
+            
+        ORDER BY click_num
+        """
+    join_settings_clause = "\nSETTINGS join_algorithm = 'full_sorting_merge'"
+    values = client.query_dataframe(user_feature_counts_query + join_settings_clause)
+
+    feature_columns = (
+        "feature_id",
+        "feature_in_query",
+        "feature_clicks",
+        "feature_passes",
+        "user_feature_clicks",
+        "user_feature_passes",
+    )
+
+    values["features"] = values.apply(
+        lambda row: pd.DataFrame({k: row[k] for k in feature_columns}),  # type: ignore
+        axis=1,
+    )  # type: ignore
+    return values
