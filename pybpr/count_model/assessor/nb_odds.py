@@ -36,8 +36,10 @@ class NBOdds:
     def rescale(self, factor: float) -> "NBOdds":
 
         log_scaler = np.log(factor) - np.log(self.numerator + self.denominator)
-        # new numerator = numerator * (factor / (numerator + denominator))
-        #   = exp(log(numerator) + log(factor) - log(numerator + denominator))
+
+        # equivalent to:
+        # new numerator = (numerator / (numerator + denominator)) * factor
+        # new denominator = (denominator / (numerator + denominator)) * factor
         return NBOdds(
             np.exp(np.log(self.numerator) + log_scaler),
             np.exp(np.log(self.denominator) + log_scaler),

@@ -36,7 +36,7 @@ def compute_naive_bayes(
 def compute_naive_bayes_using_odds(
     prior: NBOdds,
     event_odds: NBOdds,
-    features: Iterable[NBOdds],
+    factors: Iterable[NBOdds],
     bound: float = 1e-9,
 ):
     """
@@ -50,8 +50,8 @@ def compute_naive_bayes_using_odds(
 
     log_odds = prior.log_odds
     event_log_odds = event_odds.log_odds
-    for feature_odds in features:
-        log_odds += feature_odds.log_odds - event_log_odds
+    for factor_odds in factors:
+        log_odds += factor_odds.log_odds - event_log_odds
     
     posterior_odds = numpy.exp(log_odds)
     probability = posterior_odds / (1.0 + posterior_odds)

@@ -1,3 +1,4 @@
+from enum import IntEnum
 from itertools import chain
 import functools
 import os
@@ -237,44 +238,30 @@ def get_distinct_queries():
     """
 
 
-def make_stem_command(input: str) -> str:
-    tokenize_regexp = r"([^\p{L}\d]+)"
-    return f"arrayFilter(x -> isNotNull(x) and notEmpty(x), arrayMap(x -> stem('en', x), splitByRegexp('{tokenize_regexp}', lowerUTF8({input}))))"
-
-
-def get_stems(source_table: str, source_column: str):
-    return f"""
-    (
-        SELECT
-            arrayJoin({make_stem_command(source_column)}) as stem,
-            COUNT(1) {source_column}_count
-        FROM
-            {source_table}
-        GROUP BY stem
-    )
-    """
-
-
 def make_stem_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
-    client.execute("SET allow_experimental_nlp_functions = 1;")
 
     stem_columns = [
         ("stem_id", "UInt32"),
         ("stem", "String"),
-        ("query_count", "UInt64"),
-        ("title_count", "UInt64"),
-        ("long_description_count", "UInt64"),
-        ("total_count", "UInt64"),
+        ("query_count", "UInt32"),
+        ("title_count", "UInt32"),
+        ("long_description_count", "UInt32"),
+        ("total_count", "UInt32"),
     ]
 
     create_table(client, "stem", stem_columns, ["stem_id"], ["stem_id"])
 
+    """
+    FULL OUTER JOIN
+            {get_stems('product', 'long_description')} AS descriptions
+    """
+    client.execute("SET allow_experimental_nlp_functions = 1;")
     q = f"""
         INSERT INTO stem
-        SELECT 
+        SELECT
             rowNumberInAllBlocks() stem_id,
             stem,
             coalesce(query_count, 0) query_count,
@@ -283,8 +270,6 @@ def make_stem_table(
             (query_count + title_count + long_description_count) total_count
         FROM
             {get_stems('product', 'title')} AS titles
-            FULL OUTER JOIN 
-            {get_stems('product', 'long_description')} AS descriptions
             USING (stem)
             FULL OUTER JOIN
             (
@@ -296,7 +281,100 @@ def make_stem_table(
                 GROUP BY stem
             ) AS queries
             USING (stem)
-        ORDER BY total_count DESC
+        ORDER BY total_count DESC;
+    """
+    print(q)
+    client.execute(q)
+
+
+def make_stem_command(input: str) -> str:
+    tokenize_regexp = r"([^\p{L}\d]+)"
+    return f"arrayFilter(x -> isNotNull(x) and notEmpty(x), arrayMap(x -> stem('en', x), splitByRegexp('{tokenize_regexp}', lowerUTF8({input}))))"
+
+
+def get_stems(source_table: str, source_column: str):
+    return f"""
+    (
+        SELECT
+            'stem' feature_type,
+            NULL int_value,
+            arrayJoin({make_stem_command(source_column)}) string_value,
+            0 query_count,
+            1 product_count
+        FROM
+            {source_table}
+    )
+    """
+
+
+def make_feature_table(
+    db: DatabaseInfo,
+):
+    client = db.make_client()
+
+    columns = [
+        ("feature_id", "UInt32"),
+        ("feature_type", "LowCardinality(String)"),
+        ("int_value", "Int64"),
+        ("string_value", "String"),
+        ("query_count", "UInt32"),
+        ("product_count", "UInt32"),
+    ]
+
+    create_table(client, "feature", columns, ["feature_id"], ["feature_id"])
+
+    client.execute("SET allow_experimental_nlp_functions = 1;")
+
+    def make_product_column_feature(
+        feature_type: str, int_column: str, str_column: str
+    ) -> str:
+        return f"""
+        (
+                SELECT
+                    '{feature_type}' feature_type,
+                    {int_column} int_value,
+                    {str_column} string_value,
+                    0 query_count,
+                    1 product_count
+                FROM
+                    product
+        )
+        """
+
+    q = f"""
+        INSERT INTO feature
+        SELECT 
+            rowNumberInAllBlocks() feature_id,
+            feature_type,
+            int_value,
+            string_value,
+            SUM(query_count) query_count,
+            SUM(product_count) product_count
+        FROM
+        (
+            {get_stems('product', 'title')}
+            UNION ALL
+            (
+                SELECT
+                    'stem' feature_type,
+                    NULL int_value,
+                    arrayJoin({make_stem_command('query_string')}) string_value,
+                    1 query_count,
+                    0 product_count
+                FROM
+                    ({get_distinct_queries()}) as queries
+            )
+            UNION ALL
+            {make_product_column_feature('final_department_id', 'final_department_id', 'NULL')}
+            UNION ALL
+            {make_product_column_feature('product_type', 'NULL', 'product_type')}
+            UNION ALL
+            {make_product_column_feature('seller_id', 'seller_id', 'NULL')}
+            UNION ALL
+            {make_product_column_feature('store_id', 'store_id', 'NULL')}
+        )
+        GROUP BY feature_type, int_value, string_value
+        ORDER BY product_count DESC
     """
     print(q)
     client.execute(q)
@@ -306,20 +384,20 @@ def get_stem_ids_from_column(table: str, id_column: str, target_column: str) -> 
     return f"""
     SELECT
         {id_column},
-        stem_id
+        feature_id
     FROM
     (
         SELECT 
             {id_column},
-            arrayJoin({make_stem_command(target_column)}) stem
+            arrayJoin({make_stem_command(target_column)}) string_value
         FROM
             {table}
     ) x
-    INNER JOIN stem USING (stem)
+    INNER JOIN feature ON (feature.feature_type = 'stem' AND feature.string_value = string_value)
     """
 
 
-def make_product_title_stem_table(
+def make_product_feature_map_table(
     db: DatabaseInfo,
 ):
     client = db.make_client()
@@ -328,28 +406,81 @@ def make_product_title_stem_table(
     columns = [
         ("product_id", "UInt64"),
         ("feature_id", "UInt32"),
+        ("context", "LowCardinality(String)"),
+        ("num", "UInt16"),
     ]
 
-    create_table(client, "product_title_stem", columns, ["product_id", "feature_id"])
+    create_table(client, "product_feature_map", columns, ["product_id", "feature_id"])
 
-    client.execute(
-        f"""
-            INSERT INTO product_title_stem
+    def get_stems_from_product(column: str):
+        return f"""
             SELECT
                 product_id,
-                stem_id AS feature_id
+                feature_id,
+                '{column}' context
             FROM
                 (
                 SELECT 
                     product_id,
-                    arrayJoin({make_stem_command('title')}) as stem
+                    arrayJoin({make_stem_command(column)}) as string_value
                 FROM
                     product
                 ) product_data
                 INNER JOIN 
-                stem
-                USING (stem)
-                """
+                feature
+                ON (feature.feature_type = 'stem' AND feature.string_value = string_value)
+        """
+
+    def get_feature_from_product_column(
+        column: str,
+        is_int: bool,
+    ) -> str:
+
+        if is_int:
+            join_clause = f"feature.int_value = value"
+        else:
+            join_clause = f"feature.string_value = value"
+
+        return f"""
+           SELECT
+                product_id,
+                feature_id,
+                '{column}' context
+            FROM
+                (
+                SELECT 
+                    product_id,
+                    {column} value
+                FROM
+                    product
+                ) product_data
+                INNER JOIN 
+                feature
+                ON (feature.feature_type = '{column}' AND {join_clause})
+        """
+
+    client.execute(
+        f"""
+            INSERT INTO product_feature_map
+            SELECT
+                product_id,
+                feature_id,
+                context,
+                COUNT(1) num
+            FROM
+            (
+                {get_stems_from_product('title')}
+                UNION ALL
+                {get_feature_from_product_column('final_department_id', True)}
+                UNION ALL
+                {get_feature_from_product_column('product_type', False)}
+                UNION ALL
+                {get_feature_from_product_column('seller_id', True)}
+                UNION ALL
+                {get_feature_from_product_column('store_id', True)}
+            )
+            GROUP BY product_id, feature_id, context
+            """
     )
 
 
@@ -538,35 +669,6 @@ def make_user_feature_count_table(
         ["user_num", "feature_id", "date_created"],
     )
 
-    # client.execute(
-    #     f"""
-    #         INSERT INTO user_feature_count
-    #         SELECT
-    #             src.user_num,
-    #             product_title_stem.feature_id,
-    #             src.date_created,
-    #             (SUM(clicked) OVER w) AS cumulative_clicks,
-    #             (SUM(NOT clicked) OVER w) AS cumulative_passes
-    #         FROM
-    #             (
-    #                 SELECT
-    #                     user_num,
-    #                     date_created,
-    #                     clicked,
-    #                     product_id
-    #                 FROM
-    #                     click
-    #                 ORDER BY user_num, date_created
-    #             ) src
-    #             INNER JOIN product_title_stem USING (product_id)
-    #         WINDOW
-    #             w AS (
-    #                 PARTITION BY (user_num, product_title_stem.feature_id)
-    #                 ORDER BY date_created
-    #                 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-    #                 )
-    #         """
-    # )
     client.execute(
         f"""
             INSERT INTO user_feature_count
@@ -580,17 +682,18 @@ def make_user_feature_count_table(
             (
                 SELECT
                     user_num,
-                    product_title_stem.feature_id,
+                    product_feature_map.feature_id,
                     date_created,
                     SUM(clicked) clicks,
                     SUM(NOT clicked) passes
                 FROM
                     click
-                    INNER JOIN product_title_stem USING (product_id)
+                    INNER JOIN product_feature_map USING (product_id)
                 WHERE
                     clicked IS NOT NULL
                 GROUP BY user_num, feature_id, date_created
                 ORDER BY user_num, feature_id, date_created ASC
+                SETTINGS join_algorithm = 'partial_merge'
             ) src
             WINDOW
                 w AS (
@@ -633,13 +736,13 @@ def make_global_feature_count_table(
             FROM
             (
                 SELECT
-                    product_title_stem.feature_id,
+                    product_feature_map.feature_id,
                     click.date_created,
                     SUM(clicked) clicks,
                     SUM(NOT clicked) passes
                 FROM
                     click
-                    INNER JOIN product_title_stem USING (product_id)
+                    INNER JOIN product_feature_map USING (product_id)
                 WHERE
                     clicked IS NOT NULL
                 GROUP BY feature_id, date_created
@@ -653,29 +756,6 @@ def make_global_feature_count_table(
                     )
             """
     )
-    # ORDER BY date_created
-    # client.execute(
-    #     f"""
-    #         INSERT INTO global_feature_count
-    #         SELECT
-    #             product_title_stem.feature_id,
-    #             click.date_created,
-    #             (SUM(clicked) OVER w) AS cumulative_clicks,
-    #             (SUM(NOT clicked) OVER w) AS cumulative_passes
-    #         FROM
-    #             click
-    #             INNER JOIN product_title_stem USING (product_id)
-    #         WINDOW
-    #             w AS (
-    #                 PARTITION BY (product_title_stem.feature_id)
-    #                 ORDER BY date_created
-    #                 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-    #                 )
-    #         """
-    # )
-    # LEFT JOIN query_stem USING(query_id, feature_id)
-    # (SUM(is_click AND (query_stem.query_id IS NOT NULL)) OVER w) AS cumulative_query_clicks,
-    # (SUM((NOT is_click) AND (query_stem.query_id IS NOT NULL)) OVER w) - cumulative_query_clicks AS cumulative_query_passes
 
 
 def make_global_product_count_table(
@@ -908,8 +988,8 @@ def get_counts_for_interaction1(db: DatabaseInfo, interaction_query) -> pd.DataF
             user_product_count.cumulative_clicks user_product_clicks,
             user_product_count.cumulative_passes user_product_passes,
 
-            product_title_stem.feature_id feature_id,
-            (query_stem.feature_id = product_title_stem.feature_id) feature_in_query,
+            product_feature_map.feature_id feature_id,
+            (query_stem.feature_id = product_feature_map.feature_id) feature_in_query,
             global_feature_count.cumulative_clicks feature_clicks,
             global_feature_count.cumulative_passes feature_passes,
             user_feature_count.cumulative_clicks user_feature_clicks,
@@ -920,7 +1000,7 @@ def get_counts_for_interaction1(db: DatabaseInfo, interaction_query) -> pd.DataF
             INNER JOIN global_product_count USING (product_id, date_created)
             INNER JOIN user_counts USING (user_num, date_created)
             INNER JOIN user_product_count USING (user_num, product_id, date_created)
-            INNER JOIN product_title_stem USING (product_id)
+            INNER JOIN product_feature_map USING (product_id)
             INNER JOIN global_feature_count USING (feature_id, date_created)
             INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
             LEFT OUTER JOIN query_stem USING (query_id, feature_id)
@@ -976,15 +1056,15 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
                     any(interaction.clicked) clicked,
                     any(interaction.query_id) query_id,
                     any(interaction.product_id) product_id,
-                    groupArray(product_title_stem.feature_id) feature_id,
-                    groupArray(query_stem.feature_id = product_title_stem.feature_id) feature_in_query,
+                    groupArray(product_feature_map.feature_id) feature_id,
+                    groupArray(query_stem.feature_id = product_feature_map.feature_id) feature_in_query,
                     groupArray(global_feature_count.cumulative_clicks) feature_clicks,
                     groupArray(global_feature_count.cumulative_passes) feature_passes,
                     groupArray(user_feature_count.cumulative_clicks) user_feature_clicks,
                     groupArray(user_feature_count.cumulative_passes) user_feature_passes
                 FROM
                     ({interaction_query}) AS interaction
-                    INNER JOIN product_title_stem USING (product_id)
+                    INNER JOIN product_feature_map USING (product_id)
                     INNER JOIN global_feature_count USING (feature_id, date_created)
                     INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
                     LEFT OUTER JOIN query_stem USING (query_id, feature_id)
@@ -998,7 +1078,9 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
         ORDER BY click_num
         """
     join_settings_clause = "\nSETTINGS join_algorithm = 'full_sorting_merge'"
-    values = client.query_dataframe(user_feature_counts_query + join_settings_clause)
+    interactions = client.query_dataframe(
+        user_feature_counts_query + join_settings_clause
+    )
 
     feature_columns = (
         "feature_id",
@@ -1009,8 +1091,22 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
         "user_feature_passes",
     )
 
-    values["features"] = values.apply(
+    interactions["features"] = interactions.apply(
         lambda row: pd.DataFrame({k: row[k] for k in feature_columns}),  # type: ignore
         axis=1,
     )  # type: ignore
-    return values
+
+    interactions["event"] = interactions["clicked"].astype(np.float32)
+    return interactions
+
+
+def briar_score(probability, event):
+    return np.square(probability - event)
+
+
+def log_score(probability, event):
+    return event * -np.log(probability) + (1 - event) * -np.log(1.0 - probability)
+
+
+def accuracy_score(probability, event):
+    return (probability > 0.5) * event + (probability < 0.5) * (1 - event)
