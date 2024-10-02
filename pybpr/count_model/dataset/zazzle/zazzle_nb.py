@@ -481,7 +481,7 @@ def make_product_feature_map_table(
             )
             GROUP BY product_id, feature_id, context
             """
-    )
+    )  # first 3 words of title, department, store
 
 
 def make_query_table(
@@ -949,11 +949,14 @@ def make_user_counts_table(
 
 
 def make_interaction_query(clicked, limit, offset):
+    click_clause = ""
+    if clicked is not None:
+        click_clause = f"WHERE clicked = {clicked}"
     return f"""
         SELECT 
             interaction_num, click_num, user_num, date_created, clicked, query_id, product_id 
         FROM click
-        WHERE clicked = {clicked}
+        {click_clause}
         ORDER BY intHash64(interaction_num) 
         LIMIT {limit} OFFSET {offset}
     """
@@ -993,7 +996,11 @@ def get_counts_for_interaction1(db: DatabaseInfo, interaction_query) -> pd.DataF
             global_feature_count.cumulative_clicks feature_clicks,
             global_feature_count.cumulative_passes feature_passes,
             user_feature_count.cumulative_clicks user_feature_clicks,
-            user_feature_count.cumulative_passes user_feature_passes
+            user_feature_count.cumulative_passes user_feature_passes,
+
+            feature.feature_type feature_type,
+            feature.int_value int_value,
+            feature.string_value string_value
         FROM
             ({interaction_query}) AS interaction_query
             INNER JOIN global_click_count USING (date_created)
@@ -1003,6 +1010,7 @@ def get_counts_for_interaction1(db: DatabaseInfo, interaction_query) -> pd.DataF
             INNER JOIN product_feature_map USING (product_id)
             INNER JOIN global_feature_count USING (feature_id, date_created)
             INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
+            INNER JOIN feature USING (feature_id)
             LEFT OUTER JOIN query_stem USING (query_id, feature_id)
         ORDER BY click_num
         """
@@ -1045,7 +1053,10 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
             interaction.feature_clicks feature_clicks,
             interaction.feature_passes feature_passes,
             interaction.user_feature_clicks user_feature_clicks,
-            interaction.user_feature_passes user_feature_passes
+            interaction.user_feature_passes user_feature_passes,
+            interaction.feature_type,
+            interaction.int_value,
+            interaction.string_value
         FROM
             (
                 SELECT
@@ -1061,12 +1072,16 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
                     groupArray(global_feature_count.cumulative_clicks) feature_clicks,
                     groupArray(global_feature_count.cumulative_passes) feature_passes,
                     groupArray(user_feature_count.cumulative_clicks) user_feature_clicks,
-                    groupArray(user_feature_count.cumulative_passes) user_feature_passes
+                    groupArray(user_feature_count.cumulative_passes) user_feature_passes,
+                    groupArray(feature.feature_type) feature_type,
+                    groupArray(feature.int_value) int_value,
+                    groupArray(feature.string_value) string_value
                 FROM
                     ({interaction_query}) AS interaction
                     INNER JOIN product_feature_map USING (product_id)
                     INNER JOIN global_feature_count USING (feature_id, date_created)
                     INNER JOIN user_feature_count USING (user_num, feature_id, date_created)
+                    INNER JOIN feature USING (feature_id)
                     LEFT OUTER JOIN query_stem USING (query_id, feature_id)
                 GROUP BY interaction.interaction_num, interaction.click_num
             ) AS interaction            
@@ -1084,6 +1099,9 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
 
     feature_columns = (
         "feature_id",
+        "feature_type",
+        "int_value",
+        "string_value",
         "feature_in_query",
         "feature_clicks",
         "feature_passes",
@@ -1100,13 +1118,17 @@ def get_counts_for_interaction(db: DatabaseInfo, interaction_query) -> pd.DataFr
     return interactions
 
 
-def briar_score(probability, event):
+def brier_score(probability, event):  # minimize
     return np.square(probability - event)
 
 
-def log_score(probability, event):
+def log_score(probability, event):  # minimize
     return event * -np.log(probability) + (1 - event) * -np.log(1.0 - probability)
 
 
-def accuracy_score(probability, event):
-    return (probability > 0.5) * event + (probability < 0.5) * (1 - event)
+def accuracy_score(probability, event):  # maximize
+    return (
+        (probability > 0.5) * event
+        + (probability < 0.5) * (1 - event)
+        + (probability == 0.5) * 0.5
+    )
